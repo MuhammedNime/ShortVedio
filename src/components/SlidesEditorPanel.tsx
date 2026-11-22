@@ -24,7 +24,12 @@ import {
   generateSlideVoiceoverSafe,
 } from '../services/aiClient';
 import { readFileAsDataUrl } from '../storage/projectStore';
-import { QuestionSlide, SlideAudioClip } from '../types/quiz';
+import {
+  ImageChallengeMode,
+  QuestionSlide,
+  SlideAudioClip,
+  SlideType,
+} from '../types/quiz';
 import { MathFieldInput } from './MathFieldInput';
 import { MicRecordButton } from './MicRecordButton';
 
@@ -217,7 +222,8 @@ export const SlidesEditorPanel: React.FC<SlidesEditorPanelProps> = ({
         }
 
         if (voiceMode === 'full') {
-          for (let oIdx = 0; oIdx < 4; oIdx++) {
+          const optCount = workingSlide.slideType === 'trueFalse' ? 2 : 4;
+          for (let oIdx = 0; oIdx < optCount; oIdx++) {
             const optText = workingSlide.options[oIdx]?.trim();
             if (optText && !workingSlide.voiceover?.options?.[oIdx]) {
               setVoiceStepText(`سؤال ${sIdx + 1}/${slides.length}: خيار ${oIdx + 1}...`);
@@ -414,9 +420,69 @@ export const SlidesEditorPanel: React.FC<SlidesEditorPanelProps> = ({
 
       {/* Active Slide Actions */}
       <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[var(--pline)] pt-4">
-        <h2 className="text-sm font-bold text-[var(--ptxt)]">
-          تعديل السؤال {activeIndex + 1}
-        </h2>
+        <div className="flex items-center gap-2">
+          <h2 className="text-sm font-bold text-[var(--ptxt)]">
+            تعديل السؤال {activeIndex + 1}
+          </h2>
+          <div className="flex items-center gap-0.5 p-0.5 rounded-lg bg-[var(--surface)] border border-[var(--pline)]">
+            <button
+              type="button"
+              onClick={() => {
+                if ((activeSlide.slideType || 'multiple') === 'multiple') return;
+                const opts = [...activeSlide.options] as [string, string, string, string];
+                if (!opts[2]) opts[2] = 'خيار 3';
+                if (!opts[3]) opts[3] = 'خيار 4';
+                onUpdateSlide(activeIndex, {
+                  ...activeSlide,
+                  slideType: 'multiple',
+                  options: opts,
+                });
+              }}
+              className={`px-2 py-1 rounded-md text-[11px] font-bold transition-colors cursor-pointer ${
+                (activeSlide.slideType || 'multiple') === 'multiple'
+                  ? 'bg-[#00B050] text-white'
+                  : 'text-[var(--pmuted)] hover:text-[var(--ptxt)]'
+              }`}
+            >
+              4 خيارات
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (activeSlide.slideType === 'trueFalse') return;
+                const opts = [...activeSlide.options] as [string, string, string, string];
+                const isDefaultSample =
+                  !opts[0] ||
+                  opts[0] === 'الجواب الصحيح' ||
+                  opts[0] === 'الخيار الأول' ||
+                  opts[1] === 'خيار خاطئ 1';
+                if (isDefaultSample) {
+                  opts[0] = 'صح';
+                  opts[1] = 'خطأ';
+                } else {
+                  opts[0] = opts[0] || 'صح';
+                  opts[1] = opts[1] || 'خطأ';
+                }
+                const nextCorrect = (activeSlide.correctIndex > 1 ? 0 : activeSlide.correctIndex) as
+                  | 0
+                  | 1;
+                onUpdateSlide(activeIndex, {
+                  ...activeSlide,
+                  slideType: 'trueFalse' as SlideType,
+                  options: opts,
+                  correctIndex: nextCorrect,
+                });
+              }}
+              className={`px-2 py-1 rounded-md text-[11px] font-bold transition-colors cursor-pointer ${
+                activeSlide.slideType === 'trueFalse'
+                  ? 'bg-[#00B050] text-white'
+                  : 'text-[var(--pmuted)] hover:text-[var(--ptxt)]'
+              }`}
+            >
+              صح أم خطأ ✓✗
+            </button>
+          </div>
+        </div>
         <div className="flex flex-wrap items-center gap-1.5">
           <button
             type="button"
@@ -433,15 +499,17 @@ export const SlidesEditorPanel: React.FC<SlidesEditorPanelProps> = ({
             <span>{voicingTarget === 'all' ? voiceStepText : 'توليد صوت ذكي'}</span>
           </button>
 
-          <button
-            type="button"
-            onClick={handleShuffleOptions}
-            title="خلط ترتيب الخيارات عشوائياً"
-            className="flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-[var(--surface)] hover:border-[var(--gold)] border border-[var(--pline)] text-[var(--ptxt)] text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-          >
-            <Shuffle className="w-3.5 h-3.5 text-[var(--gold)]" />
-            <span>خلط</span>
-          </button>
+          {activeSlide.slideType !== 'trueFalse' && (
+            <button
+              type="button"
+              onClick={handleShuffleOptions}
+              title="خلط ترتيب الخيارات عشوائياً"
+              className="flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-[var(--surface)] hover:border-[var(--gold)] border border-[var(--pline)] text-[var(--ptxt)] text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <Shuffle className="w-3.5 h-3.5 text-[var(--gold)]" />
+              <span>خلط</span>
+            </button>
+          )}
 
           <button
             type="button"
@@ -473,7 +541,11 @@ export const SlidesEditorPanel: React.FC<SlidesEditorPanelProps> = ({
                   question: '',
                   imageDataUrl: undefined,
                   imageName: undefined,
-                  options: ['', '', '', ''],
+                  imageChallengeMode: 'normal',
+                  options:
+                    activeSlide.slideType === 'trueFalse'
+                      ? ['صح', 'خطأ', '', '']
+                      : ['', '', '', ''],
                   correctIndex: 0,
                   explanationText: '',
                   voiceover: undefined,
@@ -536,7 +608,9 @@ export const SlidesEditorPanel: React.FC<SlidesEditorPanelProps> = ({
                   : 'text-[var(--pmuted)] hover:text-[var(--ptxt)]'
               }`}
             >
-              السؤال + 4 خيارات + الحل (6)
+              {activeSlide.slideType === 'trueFalse'
+                ? 'السؤال + الخيارين + الحل (4)'
+                : 'السؤال + 4 خيارات + الحل (6)'}
             </button>
           </div>
         </div>
@@ -689,31 +763,83 @@ export const SlidesEditorPanel: React.FC<SlidesEditorPanelProps> = ({
           />
 
           {activeSlide.imageDataUrl ? (
-            <div className="flex items-center justify-between gap-2 w-full px-2.5 py-1.5 rounded-lg bg-[var(--surface)] border border-[var(--pline)]">
-              <div className="flex items-center gap-2 min-w-0">
-                <img
-                  src={activeSlide.imageDataUrl}
-                  alt="صورة السؤال"
-                  className="w-9 h-9 rounded-md object-cover border border-[var(--pline)] shrink-0"
-                />
-                <span className="text-[11px] text-[var(--ptxt)] truncate">
-                  {activeSlide.imageName || 'صورة توضيحية للسؤال'}
-                </span>
+            <div className="flex flex-col gap-2 w-full p-2.5 rounded-lg bg-[var(--surface)] border border-[var(--pline)]">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 min-w-0">
+                  <img
+                    src={activeSlide.imageDataUrl}
+                    alt="صورة السؤال"
+                    className={`w-9 h-9 rounded-md object-cover border border-[var(--pline)] shrink-0 ${
+                      activeSlide.imageChallengeMode && activeSlide.imageChallengeMode !== 'normal'
+                        ? 'blur-[2px]'
+                        : ''
+                    }`}
+                  />
+                  <span className="text-[11px] text-[var(--ptxt)] truncate">
+                    {activeSlide.imageName || 'صورة توضيحية للسؤال'}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() =>
+                    onUpdateSlide(activeIndex, {
+                      ...activeSlide,
+                      imageDataUrl: undefined,
+                      imageName: undefined,
+                      imageChallengeMode: 'normal',
+                    })
+                  }
+                  title="حذف الصورة التوضيحية"
+                  className="p-1.5 rounded-md text-rose-400 hover:bg-rose-500/15 cursor-pointer shrink-0"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
               </div>
-              <button
-                type="button"
-                onClick={() =>
-                  onUpdateSlide(activeIndex, {
-                    ...activeSlide,
-                    imageDataUrl: undefined,
-                    imageName: undefined,
-                  })
-                }
-                title="حذف الصورة التوضيحية"
-                className="p-1.5 rounded-md text-rose-400 hover:bg-rose-500/15 cursor-pointer shrink-0"
-              >
-                <Trash2 className="w-3.5 h-3.5" />
-              </button>
+
+              <div className="flex flex-col gap-1.5 pt-1.5 border-t border-[var(--pline)]/70">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[11px] font-semibold text-[var(--gold)]">
+                    تحدي الصورة المموّهة:
+                  </span>
+                  <select
+                    value={activeSlide.imageChallengeMode || 'normal'}
+                    onChange={(e) =>
+                      onUpdateSlide(activeIndex, {
+                        ...activeSlide,
+                        imageChallengeMode: e.target.value as ImageChallengeMode,
+                      })
+                    }
+                    className="px-2 py-1 rounded-md bg-[var(--panel)] border border-[var(--pline)] text-[11px] text-[var(--ptxt)] focus:border-[#00B050] focus:outline-none"
+                  >
+                    <option value="normal">عادي (واضحة فوراً)</option>
+                    <option value="blurToClear">مموّهة وتنكشف عند الجواب 🔍</option>
+                    <option value="gradualClear">توضح تدريجياً أثناء العد ⏳</option>
+                  </select>
+                </div>
+
+                {activeSlide.imageChallengeMode && activeSlide.imageChallengeMode !== 'normal' && (
+                  <label className="flex items-center gap-2 text-[11px] text-[var(--pmuted)]">
+                    <span className="whitespace-nowrap">درجة التمويه:</span>
+                    <input
+                      type="range"
+                      min={12}
+                      max={48}
+                      step={2}
+                      value={activeSlide.imageBlurStrength ?? 28}
+                      onChange={(e) =>
+                        onUpdateSlide(activeIndex, {
+                          ...activeSlide,
+                          imageBlurStrength: parseInt(e.target.value, 10),
+                        })
+                      }
+                      className="flex-1 h-1"
+                    />
+                    <span className="font-mono-nums text-[var(--ptxt)]">
+                      {activeSlide.imageBlurStrength ?? 28}
+                    </span>
+                  </label>
+                )}
+              </div>
             </div>
           ) : (
             <button
@@ -722,22 +848,24 @@ export const SlidesEditorPanel: React.FC<SlidesEditorPanelProps> = ({
               className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-[var(--surface)] hover:border-[var(--gold)] border border-[var(--pline)] text-[11px] font-medium text-[var(--pmuted)] hover:text-[var(--ptxt)] transition-colors cursor-pointer"
             >
               <ImagePlus className="w-3.5 h-3.5 text-[var(--gold)]" />
-              <span>+ إضافة صورة توضيحية للسؤال (علم / معلم / شكل هندسي)</span>
+              <span>+ إضافة صورة للسؤال (عادي أو تحدي صورة مموّهة 🔍)</span>
             </button>
           )}
         </div>
       </div>
 
-      {/* 4 Options + Green Correct Selector + MathLive + Per-Option AI & Upload Audio */}
+      {/* Options + Green Correct Selector + MathLive + Per-Option AI & Upload Audio */}
       <div className="flex flex-col gap-2">
         <div className="flex items-center justify-between gap-2">
           <span className="text-xs font-bold text-[var(--ptxt)]">
-            الخيارات الأربعة (اضغط ✨ لتوليد صوت أي خيار بالذكاء الاصطناعي)
+            {activeSlide.slideType === 'trueFalse'
+              ? 'خيارا صح أو خطأ (حدد الإجابة الصحيحة)'
+              : 'الخيارات الأربعة (اضغط ✨ لتوليد صوت أي خيار بالذكاء الاصطناعي)'}
           </span>
         </div>
 
         <div className="flex flex-col gap-2">
-          {[0, 1, 2, 3].map((optIdx) => {
+          {(activeSlide.slideType === 'trueFalse' ? [0, 1] : [0, 1, 2, 3]).map((optIdx) => {
             const isCorrect = activeSlide.correctIndex === optIdx;
             const optClip = activeSlide.voiceover?.options?.[optIdx];
             const inputKey = `opt-${optIdx}`;

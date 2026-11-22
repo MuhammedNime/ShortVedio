@@ -26,7 +26,112 @@ export class AiApiError extends Error {
 
 const ENV_MAP = (import.meta as unknown as { env?: Record<string, string | undefined> }).env ?? {};
 const BUILD_API_BASE = (ENV_MAP.VITE_API_BASE_URL || '').trim().replace(/\/$/, '');
-const EMBEDDED_APK_GEMINI_KEY = (ENV_MAP.VITE_GEMINI_API_KEY || '').trim();
+const EMBEDDED_APK_GEMINI_KEYS = (() => {
+  const combined = [ENV_MAP.VITE_GEMINI_API_KEY || '', ENV_MAP.VITE_GEMINI_API_KEYS || ''].join('\n');
+  const seen = new Set<string>();
+  const list: string[] = [];
+  for (const part of combined.split(/[\s,;]+/)) {
+    const clean = part.trim();
+    if (!clean || clean === 'MY_GEMINI_API_KEY' || seen.has(clean)) continue;
+    seen.add(clean);
+    list.push(clean);
+  }
+  return list;
+})();
+
+const APK_COOLDOWN_STORAGE_KEY = 'apk_gemini_key_cooldowns_v1';
+const apkMemoryCooldowns = new Map<string, number>();
+
+function getApkKeyCooldowns(): Record<string, number> {
+  const out: Record<string, number> = {};
+  apkMemoryCooldowns.forEach((v, k) => {
+    out[k] = v;
+  });
+  if (typeof localStorage === 'undefined') return out;
+  try {
+    const raw = localStorage.getItem(APK_COOLDOWN_STORAGE_KEY);
+    if (!raw) return out;
+    const parsed = JSON.parse(raw) as Record<string, number>;
+    return { ...parsed, ...out };
+  } catch {
+    return out;
+  }
+}
+
+function setApkKeyCooldown(apiKey: string, untilMs: number): void {
+  const keyTag = apiKey.slice(-8);
+  apkMemoryCooldowns.set(keyTag, untilMs);
+  if (typeof localStorage === 'undefined') return;
+  try {
+    const existing = getApkKeyCooldowns();
+    existing[keyTag] = untilMs;
+    localStorage.setItem(APK_COOLDOWN_STORAGE_KEY, JSON.stringify(existing));
+  } catch {
+    // ignore
+  }
+}
+
+function getNextUtcResetMs(): number {
+  const now = new Date();
+  const nextUtcMidnight = Date.UTC(
+    now.getUTCFullYear(),
+    now.getUTCMonth(),
+    now.getUTCDate() + 1,
+    0,
+    5,
+    0
+  );
+  return Math.max(60_000, nextUtcMidnight - Date.now());
+}
+
+async function runApkGeminiWithRotation<T>(apiTask: (apiKey: string) => Promise<T>): Promise<T> {
+  if (EMBEDDED_APK_GEMINI_KEYS.length === 0) {
+    throw new AiApiError(
+      'مفتاح Gemini API غير مدمج في التطبيق.',
+      0,
+      false
+    );
+  }
+  const now = Date.now();
+  const cooldowns = getApkKeyCooldowns();
+  const healthy = EMBEDDED_APK_GEMINI_KEYS.filter(
+    (k) => (cooldowns[k.slice(-8)] ?? 0) <= now
+  );
+  const candidates = healthy.length > 0 ? healthy : EMBEDDED_APK_GEMINI_KEYS;
+
+  let lastErr: unknown;
+  for (const key of candidates) {
+    try {
+      return await apiTask(key);
+    } catch (err) {
+      lastErr = err;
+      const raw = err instanceof Error ? err.message : String(err);
+      const isDaily =
+        raw.includes('PerDay') || raw.includes('per day') || raw.includes('free_tier_requests');
+      const isQuotaOrRate = raw.includes('429') || raw.includes('RESOURCE_EXHAUSTED');
+      const isAuth =
+        raw.includes('403') ||
+        raw.includes('PERMISSION_DENIED') ||
+        raw.includes('API_KEY_INVALID') ||
+        raw.includes('API key not valid');
+
+      if (isDaily) {
+        setApkKeyCooldown(key, Date.now() + getNextUtcResetMs());
+        continue;
+      }
+      if (isQuotaOrRate) {
+        setApkKeyCooldown(key, Date.now() + 45_000);
+        continue;
+      }
+      if (isAuth) {
+        setApkKeyCooldown(key, Date.now() + 24 * 60 * 60_000);
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr;
+}
 
 export function isNativeApkRuntime(): boolean {
   if (typeof window === 'undefined') return false;
@@ -147,17 +252,18 @@ async function generateQuizDirectlyInApk(
   topic: string,
   count: number,
   difficulty: string,
-  contentType: 'general' | 'math'
+  contentType: 'general' | 'math' | 'trueFalse'
 ): Promise<QuestionSlide[]> {
   try {
     const { GoogleGenAI, ThinkingLevel, Type } = await import('@google/genai');
-    const ai = new GoogleGenAI({ apiKey: EMBEDDED_APK_GEMINI_KEY });
 
     const safeCount = Math.max(1, Math.min(12, Math.round(Number(count) || 3)));
     const diffLabel = difficulty && difficulty.trim() ? difficulty.trim() : 'متنوع';
+    const isTrueFalse = contentType === 'trueFalse';
     const isMath =
-      contentType === 'math' ||
-      /رياضيات|جبر|معادل|كسر|كسور|جذر|جذور|حساب|هندسة|مثلث|مشتق|تكامل/i.test(topic);
+      !isTrueFalse &&
+      (contentType === 'math' ||
+        /رياضيات|جبر|معادل|كسر|كسور|جذر|جذور|حساب|هندسة|مثلث|مشتق|تكامل/i.test(topic));
 
     const mathGuidelines = isMath
       ? `\nملاحظات مهمة لأسئلة الرياضيات:
@@ -166,7 +272,19 @@ async function generateQuizDirectlyInApk(
 - تأكد رياضياً 100% أن الخيار عند correctIndex هو الحل الصحيح الوحيد.`
       : '';
 
-    const promptText = `الموضوع أو الفكرة المطلوبة: "${topic}"
+    const promptText = isTrueFalse
+      ? `الموضوع أو الفكرة المطلوبة: "${topic}"
+عدد الأسئلة المطلوبة: ${safeCount}
+مستوى الصعوبة: ${diffLabel}
+
+أنشئ ${safeCount} سؤالاً بنمط (صح أم خطأ) باللغة العربية الفصحى السلسة والمناسبة لفيديوهات الأسئلة.
+أرجع مصفوفة JSON فقط (JSON Array) بدون أي نص إضافي خارج JSON، بحيث يحتوي كل عنصر على:
+- badgeText: عنوان قصير للشارة العلوية (مثال: صح أم خطأ · سؤال 1)
+- question: جملة خبرية أو سؤال قصير مشوق يحتمل الصواب أو الخطأ (أقل من 16 كلمة)
+- options: مصفوفة تحتوي خيارين بالضبط هما ["صح", "خطأ"]
+- correctIndex: 0 إذا كانت العبارة صحيحة، أو 1 إذا كانت خاطئة (نوّع بين 0 و 1)
+- explanationText: تصحيح أو توضيح قصير جداً (أقل من 12 كلمة)`
+      : `الموضوع أو الفكرة المطلوبة: "${topic}"
 عدد الأسئلة المطلوبة: ${safeCount}
 مستوى الصعوبة: ${diffLabel}
 ${mathGuidelines}
@@ -179,29 +297,32 @@ ${mathGuidelines}
 - correctIndex: رقم صحيح من 0 إلى 3 يمثل الإجابة الصحيحة
 - explanationText: توضيح قصير جداً للإجابة (أقل من 12 كلمة)`;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.1-flash-lite',
-      contents: promptText,
-      config: {
-        thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
-        systemInstruction:
-          'أنت خبير في إعداد أسئلة المسابقات والرياضيات لفيديوهات يوتيوب باللغة العربية. التزم بالدقة العلمية والرياضية، الاختصار الواضح، وتنويع موضع الإجابة الصحيحة بين 0 و 3.',
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.ARRAY,
-          items: {
-            type: Type.OBJECT,
-            properties: {
-              badgeText: { type: Type.STRING },
-              question: { type: Type.STRING },
-              options: { type: Type.ARRAY, items: { type: Type.STRING } },
-              correctIndex: { type: Type.INTEGER },
-              explanationText: { type: Type.STRING },
+    const response = await runApkGeminiWithRotation(async (apiKey) => {
+      const ai = new GoogleGenAI({ apiKey });
+      return ai.models.generateContent({
+        model: 'gemini-3.1-flash-lite',
+        contents: promptText,
+        config: {
+          thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
+          systemInstruction:
+            'أنت خبير في إعداد أسئلة المسابقات والرياضيات لفيديوهات يوتيوب باللغة العربية. التزم بالدقة العلمية والرياضية، الاختصار الواضح، وتنويع موضع الإجابة الصحيحة.',
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                badgeText: { type: Type.STRING },
+                question: { type: Type.STRING },
+                options: { type: Type.ARRAY, items: { type: Type.STRING } },
+                correctIndex: { type: Type.INTEGER },
+                explanationText: { type: Type.STRING },
+              },
+              required: ['badgeText', 'question', 'options', 'correctIndex', 'explanationText'],
             },
-            required: ['badgeText', 'question', 'options', 'correctIndex', 'explanationText'],
           },
         },
-      },
+      });
     });
 
     const rawText = (response.text ?? '[]').trim();
@@ -218,9 +339,31 @@ ${mathGuidelines}
     }>;
 
     const normalized = parsed
-      .filter((item) => item && item.question && Array.isArray(item.options) && item.options.length >= 4)
+      .filter(
+        (item) =>
+          item &&
+          item.question &&
+          Array.isArray(item.options) &&
+          item.options.length >= (isTrueFalse ? 2 : 4)
+      )
       .slice(0, safeCount)
       .map((item, idx) => {
+        if (isTrueFalse) {
+          const rawIdx = Number(item.correctIndex);
+          const cIdx = (rawIdx === 1 ? 1 : 0) as 0 | 1;
+          const o0 = String(item.options?.[0] ?? 'صح').trim() || 'صح';
+          const o1 = String(item.options?.[1] ?? 'خطأ').trim() || 'خطأ';
+          return {
+            id: `ai-slide-${Date.now()}-${idx}`,
+            slideType: 'trueFalse' as const,
+            badgeText: (item.badgeText ?? `صح أم خطأ · ${idx + 1}`).trim(),
+            question: item.question!.trim(),
+            options: [o0, o1, '', ''] as [string, string, string, string],
+            correctIndex: cIdx,
+            explanationText: (item.explanationText ?? '').trim(),
+          };
+        }
+
         const opts = item.options!.slice(0, 4).map((o) => String(o).trim()) as [
           string,
           string,
@@ -235,6 +378,7 @@ ${mathGuidelines}
           | 3;
         return {
           id: `ai-slide-${Date.now()}-${idx}`,
+          slideType: 'multiple' as const,
           badgeText: (item.badgeText ?? `السؤال ${idx + 1}`).trim(),
           question: item.question!.trim(),
           options: opts,
@@ -269,34 +413,36 @@ async function generateTtsDirectlyInApk(
 
   try {
     const { GoogleGenAI } = await import('@google/genai');
-    const ai = new GoogleGenAI({ apiKey: EMBEDDED_APK_GEMINI_KEY });
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash-lite-tts',
-      contents: [
-        {
-          role: 'user',
-          parts: [
-            {
-              text: cleanText,
-              speechMetadata: {
-                style:
-                  style || 'Clear, energetic, articulate Modern Standard Arabic quiz show presenter',
+    const response = await runApkGeminiWithRotation(async (apiKey) => {
+      const ai = new GoogleGenAI({ apiKey });
+      return ai.models.generateContent({
+        model: 'gemini-3.8-flash-lite-tts',
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              {
+                text: cleanText,
+                speechMetadata: {
+                  style:
+                    style || 'Clear, energetic, articulate Modern Standard Arabic quiz show presenter',
+                },
               },
-            },
-          ],
-        },
-      ],
-      config: {
-        responseModalities: ['AUDIO'],
-        speechConfig: {
-          voiceConfig: {
-            prebuiltVoiceConfig: {
-              voiceName: chosenVoice,
+            ],
+          },
+        ],
+        config: {
+          responseModalities: ['AUDIO'],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: {
+                voiceName: chosenVoice,
+              },
             },
           },
         },
-      },
+      });
     });
 
     const parts = response.candidates?.[0]?.content?.parts ?? [];
@@ -373,9 +519,9 @@ export async function generateAiQuizSlides(
   topic: string,
   count: number,
   difficulty: string,
-  contentType: 'general' | 'math' = 'general'
+  contentType: 'general' | 'math' | 'trueFalse' = 'general'
 ): Promise<QuestionSlide[]> {
-  if (isNativeApkRuntime() && EMBEDDED_APK_GEMINI_KEY && !BUILD_API_BASE) {
+  if (isNativeApkRuntime() && EMBEDDED_APK_GEMINI_KEYS.length > 0 && !BUILD_API_BASE) {
     return generateQuizDirectlyInApk(topic, count, difficulty, contentType);
   }
 
@@ -417,7 +563,7 @@ export async function generateTtsClip(
   fileName: string,
   style?: string
 ): Promise<SlideAudioClip> {
-  if (isNativeApkRuntime() && EMBEDDED_APK_GEMINI_KEY && !BUILD_API_BASE) {
+  if (isNativeApkRuntime() && EMBEDDED_APK_GEMINI_KEYS.length > 0 && !BUILD_API_BASE) {
     return generateTtsDirectlyInApk(text, voiceName, fileName, style);
   }
 
@@ -505,9 +651,10 @@ export async function generateSlideVoiceoverSafe(
     );
 
     if (mode === 'full') {
-      for (let i = 0; i < 4; i++) {
+      const optCount = slide.slideType === 'trueFalse' ? 2 : 4;
+      for (let i = 0; i < optCount; i++) {
         await pause(280);
-        onStep?.(`جارٍ توليد صوت الخيار ${i + 1} من 4...`);
+        onStep?.(`جارٍ توليد صوت الخيار ${i + 1} من ${optCount}...`);
         voiceover.options[i] = await generateTtsClip(
           slide.options[i],
           voiceName,

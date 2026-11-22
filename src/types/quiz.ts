@@ -28,6 +28,18 @@ export type BackgroundMotion = 'none' | 'slowZoom' | 'particles' | 'zoomAndParti
 
 export type PrizeLadderStyle = 'topStrip' | 'sideColumn';
 
+export type SlideType = 'multiple' | 'trueFalse';
+
+export type ImageChallengeMode = 'normal' | 'blurToClear' | 'gradualClear';
+
+export type SlideTransitionStyle =
+  | 'none'
+  | 'fade'
+  | 'slideLeft'
+  | 'slideRight'
+  | 'zoomFade'
+  | 'wipeGold';
+
 export type PresetId =
   | 'channelSand'
   | 'channelNavy'
@@ -85,10 +97,13 @@ export type BrandCornerPosition = 'topRight' | 'topLeft' | 'bottomRight' | 'bott
 
 export interface QuestionSlide {
   id: string;
+  slideType?: SlideType;
   badgeText: string;
   question: string;
   imageDataUrl?: string;
   imageName?: string;
+  imageChallengeMode?: ImageChallengeMode;
+  imageBlurStrength?: number; // 10..50
   options: [string, string, string, string];
   correctIndex: 0 | 1 | 2 | 3;
   explanationText?: string;
@@ -199,6 +214,7 @@ export interface TemplateSettings {
   prizeLadderStyle?: PrizeLadderStyle;
   prizeLadderTitle?: string;
   prizeLadderAmounts?: string[];
+  slideTransition?: SlideTransitionStyle;
 }
 
 export interface TimingSettings {
@@ -825,6 +841,7 @@ export const DEFAULT_TEMPLATE: TemplateSettings = {
   prizeLadderStyle: 'topStrip',
   prizeLadderTitle: 'الجائزة',
   prizeLadderAmounts: [...DEFAULT_PRIZE_LADDER],
+  slideTransition: 'fade',
 };
 
 export const DEFAULT_TIMING: TimingSettings = {
@@ -982,23 +999,28 @@ export function computeSlideSchedule(
   const globalOptDur =
     optSlot?.sourceType === 'custom' && optSlot.customDataUrl ? optSlot.duration ?? 0 : 0;
 
+  const optionCount = slide?.slideType === 'trueFalse' ? 2 : 4;
   const tOptions: number[] = [tOpt0];
-  let opt3Duration = 0;
+  let lastOptDuration = 0;
 
-  for (let i = 0; i < 4; i++) {
+  for (let i = 0; i < optionCount; i++) {
     const slideOptDur = slide?.voiceover?.options?.[i]?.duration ?? 0;
     const optDur = slideOptDur > 0 ? slideOptDur : globalOptDur;
     const step = auto && optDur > 0 ? optDur + gap : timing?.optionStaggerDelay ?? 0.45;
 
-    if (i < 3) {
+    if (i < optionCount - 1) {
       tOptions.push(tOptions[i] + step);
     } else {
-      opt3Duration = auto && optDur > 0 ? optDur + gap : 0.45;
+      lastOptDuration = auto && optDur > 0 ? optDur + gap : 0.45;
     }
   }
 
+  while (tOptions.length < 4) {
+    tOptions.push(tOptions[tOptions.length - 1]);
+  }
+
   const thinkingDur = Math.max(0, timing?.thinkingDuration ?? 5);
-  const tThinkingStart = tOptions[3] + opt3Duration;
+  const tThinkingStart = tOptions[optionCount - 1] + lastOptDuration;
   const tTimerExitStart = tThinkingStart + thinkingDur;
   const tSuspenseStart = tTimerExitStart;
 

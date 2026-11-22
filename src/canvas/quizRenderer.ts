@@ -6,6 +6,7 @@ import {
   PRESET_BACKDROPS,
   QuestionSlide,
   SlideSchedule,
+  SlideTransitionStyle,
   TemplateSettings,
   TimingSettings,
   computeProjectTimeline,
@@ -89,8 +90,9 @@ export function collectSoundEventsInInterval(
       events.push({ type: 'questionEnter', slideIndex: sIdx });
     }
 
+    const optCount = slides[sIdx]?.slideType === 'trueFalse' ? 2 : 4;
     tOpts.forEach((tOpt, oIdx) => {
-      if (prevTime < tOpt && currTime >= tOpt) {
+      if (oIdx < optCount && prevTime < tOpt && currTime >= tOpt) {
         events.push({ type: 'optionEnter', slideIndex: sIdx, optionIndex: oIdx });
       }
     });
@@ -630,6 +632,88 @@ function getOptionBadgeLabel(index: number, style: TemplateSettings['optionLabel
 }
 
 const imageCache = new Map<string, HTMLImageElement>();
+let blurPassCanvasA: HTMLCanvasElement | null = null;
+let blurPassCanvasB: HTMLCanvasElement | null = null;
+
+function drawBlurredChallengeImage(
+  ctx: CanvasRenderingContext2D,
+  img: HTMLImageElement,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  blurStrength: number,
+  mysteryAlpha: number,
+  fontStack: string
+): void {
+  if (blurStrength <= 0.8 || typeof document === 'undefined') {
+    ctx.drawImage(img, x, y, w, h);
+    return;
+  }
+
+  // Deterministic 2-stage bilinear downscale/upscale blur (artifact-free across all mobile WebViews & exports)
+  if (!blurPassCanvasA) blurPassCanvasA = document.createElement('canvas');
+  if (!blurPassCanvasB) blurPassCanvasB = document.createElement('canvas');
+
+  const div = Math.max(2, blurStrength * 0.72);
+  const smallW = Math.max(5, Math.round(w / div));
+  const smallH = Math.max(5, Math.round(h / div));
+  const midW = Math.max(smallW * 2, Math.round(w / Math.max(2, div * 0.45)));
+  const midH = Math.max(smallH * 2, Math.round(h / Math.max(2, div * 0.45)));
+
+  blurPassCanvasA.width = midW;
+  blurPassCanvasA.height = midH;
+  const ctxA = blurPassCanvasA.getContext('2d');
+  if (ctxA) {
+    ctxA.imageSmoothingEnabled = true;
+    ctxA.imageSmoothingQuality = 'high';
+    ctxA.clearRect(0, 0, midW, midH);
+    ctxA.drawImage(img, 0, 0, midW, midH);
+  }
+
+  blurPassCanvasB.width = smallW;
+  blurPassCanvasB.height = smallH;
+  const ctxB = blurPassCanvasB.getContext('2d');
+  if (ctxB && ctxA) {
+    ctxB.imageSmoothingEnabled = true;
+    ctxB.imageSmoothingQuality = 'high';
+    ctxB.clearRect(0, 0, smallW, smallH);
+    ctxB.drawImage(blurPassCanvasA, 0, 0, smallW, smallH);
+
+    ctx.save();
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(blurPassCanvasB, x, y, w, h);
+    ctx.restore();
+  } else {
+    ctx.drawImage(img, x, y, w, h);
+  }
+
+  if (mysteryAlpha > 0.04) {
+    ctx.save();
+    ctx.globalAlpha *= clamp01(mysteryAlpha);
+    ctx.fillStyle = 'rgba(8, 12, 24, 0.24)';
+    ctx.fillRect(x, y, w, h);
+
+    const badgeR = Math.max(26, Math.min(44, Math.min(w, h) * 0.18));
+    const cx = x + w / 2;
+    const cy = y + h / 2;
+    ctx.beginPath();
+    ctx.arc(cx, cy, badgeR, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(11, 15, 23, 0.72)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(237, 214, 162, 0.85)';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+
+    ctx.font = `900 ${Math.round(badgeR * 1.15)}px ${fontStack}`;
+    ctx.fillStyle = '#EDD6A2';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('؟', cx, cy + 2);
+    ctx.restore();
+  }
+}
 
 function loadImageCached(src: string): Promise<HTMLImageElement | null> {
   if (!src) return Promise.resolve(null);
@@ -1081,7 +1165,7 @@ function drawRevealConfetti(
   const fade = revealElapsed > 1.5 ? clamp01(1 - (revealElapsed - 1.5) / 0.9) : 1;
 
   ctx.save();
-  ctx.globalAlpha = fade;
+  ctx.globalAlpha *= fade;
   const count = 34;
   for (let i = 0; i < count; i++) {
     const angle = (i / count) * Math.PI * 2 + (i % 3) * 0.17;
@@ -1446,11 +1530,58 @@ export function renderQuizFrame(
 
   const animDuration = 0.35;
   const isChannelLayout = template.optionsLayout === 'channel2x2';
+  const isTrueFalse = slide.slideType === 'trueFalse';
   const enhanced = template.enhanceAppearance ?? true;
   const slideImg = getCachedImage(slide.imageDataUrl);
   const darkBg = isBackgroundDark(template);
   const isRevealed = localTime >= tRevealStart;
   const revealElapsed = Math.max(0, localTime - tRevealStart);
+
+  // Slide-to-Slide Transition Envelope
+  const slideTrans: SlideTransitionStyle = template.slideTransition || 'none';
+  const hasNextSlide = slideIndex < slides.length - 1;
+  const gapDur = Math.max(0.01, timing.transitionGap || 0.35);
+  let transOutProg = 0;
+  if (slideTrans !== 'none' && hasNextSlide) {
+    if (globalTime >= schedule.endTime) {
+      transOutProg = clamp01((globalTime - schedule.endTime) / gapDur);
+    } else if (timing.transitionGap < 0.15 && localTime > schedule.duration - 0.24) {
+      transOutProg = clamp01((localTime - (schedule.duration - 0.24)) / 0.24);
+    }
+  }
+  const transInDur = 0.32;
+  const transInProg =
+    slideTrans !== 'none' && (slideIndex > 0 || introDur > 0)
+      ? clamp01(localTime / transInDur)
+      : 1;
+
+  ctx.save();
+  if (slideTrans !== 'none' && (transInProg < 1 || transOutProg > 0)) {
+    const inEase = easeOutCubic(transInProg);
+    const outEase = easeOutCubic(transOutProg);
+    const fadeFactor = inEase * (1 - outEase);
+
+    if (slideTrans === 'fade' || slideTrans === 'wipeGold') {
+      ctx.globalAlpha *= fadeFactor;
+    } else if (slideTrans === 'slideLeft') {
+      ctx.globalAlpha *= fadeFactor;
+      const offsetX =
+        transOutProg > 0 ? W * 0.55 * outEase : -W * 0.55 * (1 - inEase);
+      ctx.translate(offsetX, 0);
+    } else if (slideTrans === 'slideRight') {
+      ctx.globalAlpha *= fadeFactor;
+      const offsetX =
+        transOutProg > 0 ? -W * 0.55 * outEase : W * 0.55 * (1 - inEase);
+      ctx.translate(offsetX, 0);
+    } else if (slideTrans === 'zoomFade') {
+      ctx.globalAlpha *= fadeFactor;
+      const s =
+        transOutProg > 0 ? 1 + 0.12 * outEase : 0.86 + 0.14 * inEase;
+      ctx.translate(W / 2, H / 2);
+      ctx.scale(s, s);
+      ctx.translate(-W / 2, -H / 2);
+    }
+  }
 
   // 2.5 Optional Slide Progress Counter & Bar
   if (template.showProgressCounter && slides.length > 1) {
@@ -1523,7 +1654,7 @@ export function renderQuizFrame(
     if (badgeProgress > 0) {
       const tr = computeAnimTransform(badgeProgress, 'fade');
       ctx.save();
-      ctx.globalAlpha = tr.opacity;
+      ctx.globalAlpha *= tr.opacity;
       const badgeCenterY = isWide
         ? Math.min(H * 0.14, (template.badgeY / 100) * H)
         : (template.badgeY / 100) * H;
@@ -1613,7 +1744,7 @@ export function renderQuizFrame(
     // Optional Question Illustration Image
     if (slideImg) {
       ctx.save();
-      ctx.globalAlpha = tr.opacity;
+      ctx.globalAlpha *= tr.opacity;
       const imgAspect = slideImg.naturalWidth / Math.max(1, slideImg.naturalHeight);
       let frameW = 360;
       let frameH = 250;
@@ -1654,18 +1785,62 @@ export function renderQuizFrame(
       ctx.save();
       drawRoundedRect(ctx, -frameW / 2, -frameH / 2, frameW, frameH, 24);
       ctx.clip();
-      ctx.drawImage(slideImg, -frameW / 2, -frameH / 2, frameW, frameH);
+
+      const imgMode = slide.imageChallengeMode || 'normal';
+      const maxBlur = Math.max(10, Math.min(50, slide.imageBlurStrength ?? 28));
+      let activeBlur = 0;
+      let mysteryAlpha = 0;
+
+      if (imgMode === 'blurToClear') {
+        if (!isRevealed) {
+          activeBlur = maxBlur;
+          mysteryAlpha = 1;
+        } else {
+          const clearT = easeOutCubic(clamp01(revealElapsed / 0.45));
+          activeBlur = maxBlur * (1 - clearT);
+          mysteryAlpha = 1 - clearT;
+        }
+      } else if (imgMode === 'gradualClear') {
+        if (localTime < tThinkingStart) {
+          activeBlur = maxBlur;
+          mysteryAlpha = 1;
+        } else if (!isRevealed) {
+          const thinkDur = Math.max(0.5, tRevealStart - tThinkingStart);
+          const prog = clamp01((localTime - tThinkingStart) / thinkDur);
+          activeBlur = maxBlur * (1 - 0.68 * prog);
+          mysteryAlpha = 1 - 0.6 * prog;
+        } else {
+          const clearT = easeOutCubic(clamp01(revealElapsed / 0.32));
+          activeBlur = maxBlur * 0.32 * (1 - clearT);
+          mysteryAlpha = 0.4 * (1 - clearT);
+        }
+      }
+
+      drawBlurredChallengeImage(
+        ctx,
+        slideImg,
+        -frameW / 2,
+        -frameH / 2,
+        frameW,
+        frameH,
+        activeBlur,
+        mysteryAlpha,
+        fontStack
+      );
       ctx.restore();
 
       drawRoundedRect(ctx, -frameW / 2, -frameH / 2, frameW, frameH, 24);
-      ctx.strokeStyle = template.questionBorderColor || '#FFFFFF';
-      ctx.lineWidth = 4;
+      ctx.strokeStyle =
+        imgMode !== 'normal' && isRevealed
+          ? template.correctColor || '#00B050'
+          : template.questionBorderColor || '#FFFFFF';
+      ctx.lineWidth = imgMode !== 'normal' && isRevealed ? 5 : 4;
       ctx.stroke();
       ctx.restore();
     }
 
     ctx.save();
-    ctx.globalAlpha = tr.opacity;
+    ctx.globalAlpha *= tr.opacity;
     ctx.translate(centerX, centerY);
     ctx.scale(tr.scale, tr.scale);
 
@@ -1760,12 +1935,16 @@ export function renderQuizFrame(
     ? Math.max(H * 0.45, Math.min(H * 0.56, (template.optionsStartY / 100) * H * 0.92))
     : (template.optionsStartY / 100) * H;
 
-  const rowsCount = template.optionsLayout === 'vertical' ? 4 : 2;
-  const effectiveOptH = isWide
+  const optionCount = isTrueFalse ? 2 : 4;
+  const rowsCount = template.optionsLayout === 'vertical' ? (isTrueFalse ? 2 : 4) : isTrueFalse ? 1 : 2;
+  const baseOptH = isWide
     ? template.optionsLayout === 'vertical'
       ? 104
       : Math.min(156, Math.max(122, template.optionHeight))
     : template.optionHeight;
+  const effectiveOptH = isTrueFalse && template.optionsLayout !== 'vertical'
+    ? Math.max(baseOptH, isWide ? 164 : 184)
+    : baseOptH;
 
   const effectiveRowGap = isChannelLayout
     ? isWide
@@ -1776,14 +1955,14 @@ export function renderQuizFrame(
       : template.optionsGap;
 
   const optionsBottomPx =
-    optionsStartPx + rowsCount * effectiveOptH + (rowsCount - 1) * effectiveRowGap;
+    optionsStartPx + rowsCount * effectiveOptH + Math.max(0, rowsCount - 1) * effectiveRowGap;
 
   const wrongColor = template.wrongColor || '#DC2626';
   const isRedWrongMode = template.revealStyle === 'redWrongGreenCorrect';
   let correctOriginX = W / 2;
   let correctOriginY = optionsStartPx + effectiveOptH;
 
-  for (let i = 0; i < 4; i++) {
+  for (let i = 0; i < optionCount; i++) {
     const optProgress = clamp01((localTime - tOptionStarts[i]) / animDuration);
     if (optProgress <= 0) continue;
 
@@ -1791,7 +1970,7 @@ export function renderQuizFrame(
     const isCorrect = i === slide.correctIndex;
     const isWrongRed = isRevealed && !isCorrect && isRedWrongMode;
 
-    const optWindowEnd = i < 3 ? tOptionStarts[i + 1] : tThinkingStart;
+    const optWindowEnd = i < optionCount - 1 ? tOptionStarts[i + 1] : tThinkingStart;
     const isSpokenHighlight =
       Boolean(template.highlightSpokenOption) &&
       !isRevealed &&
@@ -1813,6 +1992,13 @@ export function renderQuizFrame(
           (isRightCol ? W * 0.755 : W * 0.245) +
           (shiftForWideLadder > 0 ? (isRightCol ? 74 : 152) : 0);
         centerY = optionsStartPx + row * (boxH + effectiveRowGap) + boxH / 2;
+      } else if (isTrueFalse) {
+        // True/False 9:16 side-by-side wide cards with clean center gap
+        boxW = 0.44 * W;
+        const colLeft = i === 0 ? 0.53 * W : 0.03 * W;
+        const rowTop = (template.optionsStartY / 100) * H;
+        centerX = colLeft + boxW / 2;
+        centerY = rowTop + boxH / 2;
       } else {
         // Vertical 9:16 channel s0..s3 coordinates
         boxW = 0.488 * W;
@@ -1860,7 +2046,7 @@ export function renderQuizFrame(
     }
 
     ctx.save();
-    ctx.globalAlpha = finalAlpha;
+    ctx.globalAlpha *= finalAlpha;
     ctx.translate(centerX + tr.offsetX, centerY + tr.offsetY);
     ctx.scale(finalScale, finalScale);
 
@@ -1948,7 +2134,13 @@ export function renderQuizFrame(
       });
     }
 
-    const labelStr = getOptionBadgeLabel(i, template.optionLabelStyle);
+    const labelStr = isTrueFalse
+      ? template.optionLabelStyle === 'none'
+        ? i === 0
+          ? '✓'
+          : '✗'
+        : getOptionBadgeLabel(i, template.optionLabelStyle)
+      : getOptionBadgeLabel(i, template.optionLabelStyle);
     const hasBadge = labelStr.length > 0;
     const badgeSize = Math.min(boxH - 26, 66);
     const isHexStyle = boxStyle === 'millionaireHex';
@@ -1969,7 +2161,11 @@ export function renderQuizFrame(
           ? '#FFFFFF'
           : isWrongRed
             ? '#FEE2E2'
-            : template.optionLabelBgColor;
+            : isTrueFalse && template.optionLabelStyle === 'none'
+              ? i === 0
+                ? '#16a34a'
+                : '#dc2626'
+              : template.optionLabelBgColor;
       ctx.fill();
 
       ctx.font = `800 ${Math.round(badgeSize * 0.52)}px ${fontStack}`;
@@ -1978,7 +2174,9 @@ export function renderQuizFrame(
           ? template.correctColor
           : isWrongRed
             ? wrongColor
-            : template.optionLabelTextColor;
+            : isTrueFalse && template.optionLabelStyle === 'none'
+              ? '#FFFFFF'
+              : template.optionLabelTextColor;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillText(labelStr, badgeCenterX, 2);
@@ -1987,10 +2185,10 @@ export function renderQuizFrame(
     const showCheck =
       isRevealed &&
       isCorrect &&
-      (template.revealStyle === 'scaleCheck' || isRedWrongMode) &&
-      (!isChannelLayout || isWide || isRedWrongMode);
+      (template.revealStyle === 'scaleCheck' || isRedWrongMode || isTrueFalse) &&
+      (!isChannelLayout || isWide || isRedWrongMode || isTrueFalse);
 
-    const showCross = isWrongRed && !isChannelLayout;
+    const showCross = isWrongRed && (!isChannelLayout || isTrueFalse);
 
     const iconReserve = showCheck || showCross ? (isHexStyle ? 86 : 76) : isHexStyle ? 36 : 22;
     const rightReserve = hasBadge ? badgeMarginRight + badgeSize + 24 : isHexStyle ? 36 : 22;
@@ -2029,14 +2227,16 @@ export function renderQuizFrame(
       ctx.stroke();
     }
 
-    const optText = slide.options[i] || `الخيار ${i + 1}`;
+    const optText = slide.options[i] || (isTrueFalse ? (i === 0 ? 'صح' : 'خطأ') : `الخيار ${i + 1}`);
     const optHasMath = hasMathSyntax(optText);
 
     let optFontSize = isWide
       ? Math.min(54, Math.max(38, template.optionFontSize))
       : template.optionFontSize;
 
-    if (isChannelLayout) {
+    if (isTrueFalse) {
+      optFontSize = Math.round(optFontSize * 1.15);
+    } else if (isChannelLayout) {
       if (optText.length > 60) optFontSize = Math.round(optFontSize * 0.62);
       else if (optText.length > 35) optFontSize = Math.round(optFontSize * 0.78);
     }
@@ -2059,7 +2259,7 @@ export function renderQuizFrame(
         2
       );
     } else {
-      ctx.font = `700 ${optFontSize}px ${fontStack}`;
+      ctx.font = `${isTrueFalse ? 800 : 700} ${optFontSize}px ${fontStack}`;
       ctx.direction = 'rtl';
       ctx.fillStyle = optColor;
 
@@ -2082,6 +2282,13 @@ export function renderQuizFrame(
         ctx.fillStyle = optColor;
         optLines.slice(0, 2).forEach((line, lIdx) => {
           ctx.fillText(line, 0, optStartY + lIdx * optLineH);
+        });
+      } else if (isTrueFalse) {
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        const tfCenterX = hasBadge ? -(rightReserve - iconReserve) * 0.28 : 0;
+        optLines.slice(0, 2).forEach((line, lIdx) => {
+          ctx.fillText(line, tfCenterX, optStartY + lIdx * optLineH);
         });
       } else {
         ctx.textAlign = 'right';
@@ -2122,7 +2329,12 @@ export function renderQuizFrame(
     if (template.timerStyle === 'channelBox') {
       if (isWide) {
         timerCenterX = W * 0.5 + shiftForWideLadder;
-        timerCenterY = optionsStartPx + effectiveOptH + effectiveRowGap * 0.5;
+        timerCenterY = isTrueFalse
+          ? optionsStartPx + effectiveOptH + 100
+          : optionsStartPx + effectiveOptH + effectiveRowGap * 0.5;
+      } else if (isTrueFalse) {
+        timerCenterX = W * 0.5;
+        timerCenterY = optionsBottomPx + 108;
       } else {
         timerCenterX = 0.5025 * W;
         timerCenterY = (template.timerY / 100) * H + 0.0015 * H;
@@ -2131,10 +2343,12 @@ export function renderQuizFrame(
       timerCenterY = Math.min(H - 84, Math.max(H * 0.88, optionsBottomPx + 56));
     } else if (!isChannelLayout && template.timerY >= 55) {
       timerCenterY = Math.min(H - 360, Math.max(timerCenterY, optionsBottomPx + 96));
+    } else if (isTrueFalse) {
+      timerCenterY = Math.min(H - 360, Math.max(timerCenterY, optionsBottomPx + 108));
     }
 
     ctx.save();
-    ctx.globalAlpha = easeOutCubic(enterProg);
+    ctx.globalAlpha *= easeOutCubic(enterProg);
     ctx.translate(timerCenterX, timerCenterY);
     const s = (0.85 + 0.15 * easeOutCubic(enterProg)) * timerScale;
     ctx.scale(s, s);
@@ -2254,7 +2468,7 @@ export function renderQuizFrame(
     const expHasMath = hasMathSyntax(expText);
 
     ctx.save();
-    ctx.globalAlpha = expAlpha;
+    ctx.globalAlpha *= expAlpha;
     ctx.font = `700 30px ${fontStack}`;
     ctx.direction = 'rtl';
     const boxW = Math.min(W - 140, Math.max(760, (template.optionsWidth / 100) * W));
@@ -2293,6 +2507,26 @@ export function renderQuizFrame(
 
   // Close Global Scale Transform Scope
   ctx.restore();
+
+  // Close Slide-to-Slide Transition Scope
+  ctx.restore();
+
+  // Optional Golden Light Wipe Sweep between slides
+  if (slideTrans === 'wipeGold' && (transInProg < 1 || transOutProg > 0)) {
+    const sweepProg = transOutProg > 0 ? transOutProg * 0.5 : 0.5 + transInProg * 0.5;
+    const beamX = -W * 0.25 + W * 1.5 * sweepProg;
+    const beamAlpha = Math.sin(sweepProg * Math.PI) * 0.55;
+    if (beamAlpha > 0.02) {
+      ctx.save();
+      const beamGrad = ctx.createLinearGradient(beamX - 180, 0, beamX + 180, H * 0.25);
+      beamGrad.addColorStop(0, 'rgba(237, 214, 162, 0)');
+      beamGrad.addColorStop(0.5, `rgba(255, 243, 176, ${beamAlpha.toFixed(3)})`);
+      beamGrad.addColorStop(1, 'rgba(237, 214, 162, 0)');
+      ctx.fillStyle = beamGrad;
+      ctx.fillRect(0, 0, W, H);
+      ctx.restore();
+    }
+  }
 
   // 7.5 Channel Brand Logo / Animated Watermark & Handle
   drawBrandWatermark(ctx, template, globalTime, W, H, fontStack);

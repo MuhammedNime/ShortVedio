@@ -36,12 +36,19 @@ const MATH_SUGGESTIONS = [
   'مساحة ومحيط الأشكال الهندسية',
 ];
 
+const TRUE_FALSE_SUGGESTIONS = [
+  'حقائق علمية مدهشة (صح أم خطأ)',
+  'معلومات تاريخية وإسلامية',
+  'معلومات غريبة عن جسم الإنسان',
+  'عجائب الفضاء والطبيعة',
+];
+
 export const AiGeneratorPanel: React.FC<AiGeneratorPanelProps> = ({
   voiceName,
   onVoiceChange,
   onInsertSlides,
 }) => {
-  const [contentType, setContentType] = useState<'general' | 'math'>('general');
+  const [contentType, setContentType] = useState<'general' | 'math' | 'trueFalse'>('general');
   const [autoApplyMathTheme, setAutoApplyMathTheme] = useState(true);
   const [topic, setTopic] = useState('');
   const [count, setCount] = useState(2);
@@ -52,7 +59,12 @@ export const AiGeneratorPanel: React.FC<AiGeneratorPanelProps> = ({
   const [statusText, setStatusText] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
 
-  const suggestions = contentType === 'math' ? MATH_SUGGESTIONS : GENERAL_SUGGESTIONS;
+  const suggestions =
+    contentType === 'math'
+      ? MATH_SUGGESTIONS
+      : contentType === 'trueFalse'
+        ? TRUE_FALSE_SUGGESTIONS
+        : GENERAL_SUGGESTIONS;
 
   const handleGenerate = async (insertMode: 'append' | 'replace') => {
     const trimmed = topic.trim();
@@ -128,34 +140,46 @@ export const AiGeneratorPanel: React.FC<AiGeneratorPanelProps> = ({
         </p>
       </div>
 
-      {/* Content Mode Switch: General vs Math */}
+      {/* Content Mode Switch: General vs True/False vs Math */}
       <div className="flex flex-col gap-2">
-        <div className="grid grid-cols-2 gap-2 p-1 rounded-xl bg-[var(--surface)] border border-[var(--pline)]">
+        <div className="grid grid-cols-3 gap-1.5 p-1 rounded-xl bg-[var(--surface)] border border-[var(--pline)]">
           <button
             type="button"
             disabled={isGenerating}
             onClick={() => setContentType('general')}
-            className={`flex items-center justify-center gap-1.5 py-2 rounded-lg text-xs font-bold transition-colors cursor-pointer ${
+            className={`flex items-center justify-center gap-1 py-2 px-1 rounded-lg text-[11px] font-bold transition-colors cursor-pointer ${
               contentType === 'general'
                 ? 'bg-[#00B050] text-white'
                 : 'text-[var(--pmuted)] hover:text-[var(--ptxt)]'
             }`}
           >
             <Sparkles className="w-3.5 h-3.5" />
-            <span>أسئلة ثقافية / عامة</span>
+            <span>ثقافة (4 خيارات)</span>
+          </button>
+          <button
+            type="button"
+            disabled={isGenerating}
+            onClick={() => setContentType('trueFalse')}
+            className={`flex items-center justify-center gap-1 py-2 px-1 rounded-lg text-[11px] font-bold transition-colors cursor-pointer ${
+              contentType === 'trueFalse'
+                ? 'bg-[#00B050] text-white'
+                : 'text-[var(--pmuted)] hover:text-[var(--ptxt)]'
+            }`}
+          >
+            <span>صح أم خطأ ✓✗</span>
           </button>
           <button
             type="button"
             disabled={isGenerating}
             onClick={() => setContentType('math')}
-            className={`flex items-center justify-center gap-1.5 py-2 rounded-lg text-xs font-bold transition-colors cursor-pointer ${
+            className={`flex items-center justify-center gap-1 py-2 px-1 rounded-lg text-[11px] font-bold transition-colors cursor-pointer ${
               contentType === 'math'
                 ? 'bg-[#00B050] text-white'
                 : 'text-[var(--pmuted)] hover:text-[var(--ptxt)]'
             }`}
           >
             <Calculator className="w-3.5 h-3.5" />
-            <span>رياضيات ومعادلات 🧮</span>
+            <span>رياضيات 🧮</span>
           </button>
         </div>
 
@@ -177,7 +201,11 @@ export const AiGeneratorPanel: React.FC<AiGeneratorPanelProps> = ({
       {/* Topic / Idea input */}
       <div className="flex flex-col gap-2">
         <label className="text-xs font-bold text-[var(--ptxt)]">
-          {contentType === 'math' ? 'موضوع الرياضيات أو الدرس المطلوب' : 'فكرة الفيديو أو الموضوع'}
+          {contentType === 'math'
+            ? 'موضوع الرياضيات أو الدرس المطلوب'
+            : contentType === 'trueFalse'
+              ? 'موضوع تحدي صح أم خطأ'
+              : 'فكرة الفيديو أو الموضوع'}
         </label>
         <textarea
           rows={3}
@@ -187,7 +215,9 @@ export const AiGeneratorPanel: React.FC<AiGeneratorPanelProps> = ({
           placeholder={
             contentType === 'math'
               ? 'مثال: جمع الكسور والجذور التربيعية للمرحلة الإعدادية...'
-              : 'مثال: 3 أسئلة دينية سهلة عن الأنبياء أو الثقافة العامة...'
+              : contentType === 'trueFalse'
+                ? 'مثال: حقائق علمية وجغرافية غريبة بصيغة صح أم خطأ...'
+                : 'مثال: 3 أسئلة دينية سهلة عن الأنبياء أو الثقافة العامة...'
           }
           className="w-full px-3.5 py-2.5 rounded-xl bg-[var(--surface)] border border-[var(--pline)] focus:border-[#00B050] focus:outline-none text-sm text-[var(--ptxt)] placeholder:text-[var(--pmuted)] resize-none leading-relaxed"
         />
@@ -330,7 +360,7 @@ export const AiGeneratorPanel: React.FC<AiGeneratorPanelProps> = ({
                       : 'text-[var(--pmuted)] hover:text-[var(--ptxt)]'
                   }`}
                 >
-                  +4 خيارات (6)
+                  {contentType === 'trueFalse' ? '+خيارين (4)' : '+4 خيارات (6)'}
                 </button>
               </div>
             </div>

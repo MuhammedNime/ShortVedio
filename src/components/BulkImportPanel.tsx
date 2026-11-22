@@ -72,9 +72,34 @@ export const BulkImportPanel: React.FC<BulkImportPanelProps> = ({
         .split('\n')
         .map((l) => l.trim())
         .filter(Boolean);
-      if (lines.length < 5) return;
+      if (lines.length < 3) return;
 
       const question = lines[0];
+
+      // Support 2-option True/False blocks (3 or 4 lines)
+      if (lines.length < 5) {
+        const rawTwo = lines.slice(1, 3);
+        let correctIndex: 0 | 1 = 0;
+        const cleanTwo = rawTwo.map((opt, idx) => {
+          if (opt.startsWith('*') || opt.startsWith('✓') || opt.startsWith('+')) {
+            correctIndex = idx as 0 | 1;
+            return opt.replace(/^[*✓+]\s*/, '').trim();
+          }
+          return opt;
+        });
+        const explanationText = lines[3] ? lines[3] : '';
+        parsed.push({
+          id: `slide-${Date.now()}-${bIdx}`,
+          slideType: 'trueFalse',
+          badgeText: `صح أم خطأ · ${bIdx + 1}`,
+          question,
+          options: [cleanTwo[0] || 'صح', cleanTwo[1] || 'خطأ', '', ''],
+          correctIndex,
+          explanationText,
+        });
+        return;
+      }
+
       const rawOpts = lines.slice(1, 5);
       let correctIndex: 0 | 1 | 2 | 3 = 0;
 
@@ -90,6 +115,7 @@ export const BulkImportPanel: React.FC<BulkImportPanelProps> = ({
 
       parsed.push({
         id: `slide-${Date.now()}-${bIdx}`,
+        slideType: 'multiple',
         badgeText: `السؤال ${bIdx + 1}`,
         question,
         options: cleanOpts,

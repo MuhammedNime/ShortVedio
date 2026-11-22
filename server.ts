@@ -7,11 +7,22 @@ import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 
 const PORT = 3000;
 
-function createAiClient() {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    throw new Error('مفتاح GEMINI_API_KEY غير مضبوط في إعدادات البيئة.');
+const serverKeyCooldowns = new Map<string, number>();
+
+function getConfiguredServerKeys(): string[] {
+  const combined = [process.env.GEMINI_API_KEY || '', process.env.GEMINI_API_KEYS || ''].join('\n');
+  const seen = new Set<string>();
+  const keys: string[] = [];
+  for (const part of combined.split(/[\s,;]+/)) {
+    const clean = part.trim();
+    if (!clean || clean === 'MY_GEMINI_API_KEY' || seen.has(clean)) continue;
+    seen.add(clean);
+    keys.push(clean);
   }
+  return keys;
+}
+
+function createAiClientForKey(apiKey: string): GoogleGenAI {
   return new GoogleGenAI({
     apiKey,
     httpOptions: {
@@ -20,6 +31,65 @@ function createAiClient() {
       },
     },
   });
+}
+
+function getNextUtcResetMs(): number {
+  const now = new Date();
+  const nextUtcMidnight = Date.UTC(
+    now.getUTCFullYear(),
+    now.getUTCMonth(),
+    now.getUTCDate() + 1,
+    0,
+    5,
+    0
+  );
+  return Math.max(60_000, nextUtcMidnight - Date.now());
+}
+
+async function runServerAiWithRotation<T>(task: (ai: GoogleGenAI) => Promise<T>): Promise<T> {
+  const allKeys = getConfiguredServerKeys();
+  if (allKeys.length === 0) {
+    throw new Error('مفتاح GEMINI_API_KEY غير مضبوط في إعدادات البيئة.');
+  }
+
+  const now = Date.now();
+  const activeKeys = allKeys.filter((k) => (serverKeyCooldowns.get(k) ?? 0) <= now);
+  const candidates = activeKeys.length > 0 ? activeKeys : allKeys;
+
+  let lastErr: unknown;
+  for (const apiKey of candidates) {
+    try {
+      const ai = createAiClientForKey(apiKey);
+      return await task(ai);
+    } catch (err) {
+      lastErr = err;
+      const raw = err instanceof Error ? err.message : String(err);
+      const isDaily =
+        raw.includes('PerDay') || raw.includes('per day') || raw.includes('free_tier_requests');
+      const isQuotaOrRate = raw.includes('429') || raw.includes('RESOURCE_EXHAUSTED');
+      const isAuth =
+        raw.includes('403') ||
+        raw.includes('PERMISSION_DENIED') ||
+        raw.includes('API_KEY_INVALID') ||
+        raw.includes('API key not valid');
+
+      if (isDaily) {
+        serverKeyCooldowns.set(apiKey, Date.now() + getNextUtcResetMs());
+        continue;
+      }
+      if (isQuotaOrRate) {
+        serverKeyCooldowns.set(apiKey, Date.now() + 45_000);
+        continue;
+      }
+      if (isAuth) {
+        serverKeyCooldowns.set(apiKey, Date.now() + 24 * 60 * 60_000);
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  throw lastErr;
 }
 
 function formatGeminiError(err: unknown): {
@@ -124,7 +194,8 @@ async function startServer() {
   app.use(express.json({ limit: '10mb' }));
 
   app.get('/api/health', (_req, res) => {
-    res.json({ ok: true, hasGeminiKey: Boolean(process.env.GEMINI_API_KEY) });
+    const keys = getConfiguredServerKeys();
+    res.json({ ok: true, hasGeminiKey: keys.length > 0, keyCount: keys.length });
   });
 
   // Generate Arabic quiz questions for YouTube Shorts
@@ -134,7 +205,7 @@ async function startServer() {
         topic?: string;
         count?: number;
         difficulty?: string;
-        contentType?: 'general' | 'math';
+        contentType?: 'general' | 'math' | 'trueFalse';
       };
 
       const cleanTopic = (topic ?? '').trim();
@@ -145,11 +216,11 @@ async function startServer() {
 
       const safeCount = Math.max(1, Math.min(12, Math.round(Number(count) || 3)));
       const diffLabel = difficulty && difficulty.trim() ? difficulty.trim() : 'متنوع';
+      const isTrueFalse = contentType === 'trueFalse';
       const isMath =
-        contentType === 'math' ||
-        /رياضيات|جبر|معادل|كسر|كسور|جذر|جذور|حساب|هندسة|مثلث|مشتق|تكامل/i.test(cleanTopic);
-
-      const ai = createAiClient();
+        !isTrueFalse &&
+        (contentType === 'math' ||
+          /رياضيات|جبر|معادل|كسر|كسور|جذر|جذور|حساب|هندسة|مثلث|مشتق|تكامل/i.test(cleanTopic));
 
       const mathGuidelines = isMath
         ? `\nملاحظات مهمة لأسئلة الرياضيات:
@@ -158,7 +229,19 @@ async function startServer() {
 - تأكد رياضياً 100% أن الخيار عند correctIndex هو الحل الصحيح الوحيد.`
         : '';
 
-      const promptText = `الموضوع أو الفكرة المطلوبة: "${cleanTopic}"
+      const promptText = isTrueFalse
+        ? `الموضوع أو الفكرة المطلوبة: "${cleanTopic}"
+عدد الأسئلة المطلوبة: ${safeCount}
+مستوى الصعوبة: ${diffLabel}
+
+أنشئ ${safeCount} سؤالاً بنمط (صح أم خطأ) باللغة العربية الفصحى السلسة والمناسبة لفيديوهات الأسئلة.
+أرجع مصفوفة JSON فقط (JSON Array) بدون أي نص إضافي خارج JSON، بحيث يحتوي كل عنصر على:
+- badgeText: عنوان قصير للشارة العلوية (مثال: صح أم خطأ · سؤال 1)
+- question: جملة خبرية أو سؤال قصير مشوق يحتمل الصواب أو الخطأ (أقل من 16 كلمة)
+- options: مصفوفة تحتوي خيارين بالضبط هما ["صح", "خطأ"]
+- correctIndex: 0 إذا كانت العبارة صحيحة، أو 1 إذا كانت خاطئة (نوّع بين 0 و 1)
+- explanationText: تصحيح أو توضيح قصير جداً (أقل من 12 كلمة)`
+        : `الموضوع أو الفكرة المطلوبة: "${cleanTopic}"
 عدد الأسئلة المطلوبة: ${safeCount}
 مستوى الصعوبة: ${diffLabel}
 ${mathGuidelines}
@@ -171,9 +254,10 @@ ${mathGuidelines}
 - correctIndex: رقم صحيح من 0 إلى 3 يمثل الإجابة الصحيحة
 - explanationText: توضيح قصير جداً للإجابة (أقل من 12 كلمة)`;
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.1-flash-lite',
-        contents: promptText,
+      const response = await runServerAiWithRotation((ai) =>
+        ai.models.generateContent({
+          model: 'gemini-3.1-flash-lite',
+          contents: promptText,
         config: {
           thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
           systemInstruction:
@@ -210,7 +294,8 @@ ${mathGuidelines}
             },
           },
         },
-      });
+        })
+      );
 
       const rawText = (response.text ?? '[]').trim();
       const cleanedJson = rawText
@@ -226,9 +311,31 @@ ${mathGuidelines}
       }>;
 
       const normalized = parsed
-        .filter((item) => item && item.question && Array.isArray(item.options) && item.options.length >= 4)
+        .filter(
+          (item) =>
+            item &&
+            item.question &&
+            Array.isArray(item.options) &&
+            item.options.length >= (isTrueFalse ? 2 : 4)
+        )
         .slice(0, safeCount)
         .map((item, idx) => {
+          if (isTrueFalse) {
+            const rawIdx = Number(item.correctIndex);
+            const cIdx = (rawIdx === 1 ? 1 : 0) as 0 | 1;
+            const o0 = String(item.options?.[0] ?? 'صح').trim() || 'صح';
+            const o1 = String(item.options?.[1] ?? 'خطأ').trim() || 'خطأ';
+            return {
+              id: `ai-slide-${Date.now()}-${idx}`,
+              slideType: 'trueFalse' as const,
+              badgeText: (item.badgeText ?? `صح أم خطأ · ${idx + 1}`).trim(),
+              question: item.question!.trim(),
+              options: [o0, o1, '', ''] as [string, string, string, string],
+              correctIndex: cIdx,
+              explanationText: (item.explanationText ?? '').trim(),
+            };
+          }
+
           const opts = item.options!.slice(0, 4).map((o) => String(o).trim()) as [
             string,
             string,
@@ -243,6 +350,7 @@ ${mathGuidelines}
             | 3;
           return {
             id: `ai-slide-${Date.now()}-${idx}`,
+            slideType: 'multiple' as const,
             badgeText: (item.badgeText ?? `السؤال ${idx + 1}`).trim(),
             question: item.question!.trim(),
             options: opts,
@@ -285,36 +393,36 @@ ${mathGuidelines}
       const allowedVoices = ['Kore', 'Puck', 'Charon', 'Fenrir', 'Zephyr'];
       const chosenVoice = allowedVoices.includes(voiceName ?? '') ? voiceName! : 'Kore';
 
-      const ai = createAiClient();
-
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.8-flash-lite-tts',
-        contents: [
-          {
-            role: 'user',
-            parts: [
-              {
-                text: cleanText,
-                speechMetadata: {
-                  style:
-                    style ||
-                    'Clear, energetic, articulate Modern Standard Arabic quiz show presenter',
+      const response = await runServerAiWithRotation((ai) =>
+        ai.models.generateContent({
+          model: 'gemini-3.8-flash-lite-tts',
+          contents: [
+            {
+              role: 'user',
+              parts: [
+                {
+                  text: cleanText,
+                  speechMetadata: {
+                    style:
+                      style ||
+                      'Clear, energetic, articulate Modern Standard Arabic quiz show presenter',
+                  },
                 },
-              },
-            ],
-          },
-        ],
-        config: {
-          responseModalities: ['AUDIO'],
-          speechConfig: {
-            voiceConfig: {
-              prebuiltVoiceConfig: {
-                voiceName: chosenVoice,
+              ],
+            },
+          ],
+          config: {
+            responseModalities: ['AUDIO'],
+            speechConfig: {
+              voiceConfig: {
+                prebuiltVoiceConfig: {
+                  voiceName: chosenVoice,
+                },
               },
             },
           },
-        },
-      });
+        })
+      );
 
       const parts = response.candidates?.[0]?.content?.parts ?? [];
       const audioPart = parts.find((p) => p.inlineData?.data);

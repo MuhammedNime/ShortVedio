@@ -155,26 +155,40 @@ async function idbDelete(key: string): Promise<void> {
 }
 
 function sanitizeSlide(raw: Partial<QuestionSlide> | null | undefined, idx: number): QuestionSlide {
+  const slideType = raw?.slideType === 'trueFalse' ? 'trueFalse' : 'multiple';
   const rawOpts = Array.isArray(raw?.options) ? raw.options : [];
   const options: [string, string, string, string] = [
-    typeof rawOpts[0] === 'string' ? rawOpts[0] : 'الخيار الأول',
-    typeof rawOpts[1] === 'string' ? rawOpts[1] : 'الخيار الثاني',
-    typeof rawOpts[2] === 'string' ? rawOpts[2] : 'الخيار الثالث',
-    typeof rawOpts[3] === 'string' ? rawOpts[3] : 'الخيار الرابع',
+    typeof rawOpts[0] === 'string' ? rawOpts[0] : slideType === 'trueFalse' ? 'صح' : 'الخيار الأول',
+    typeof rawOpts[1] === 'string' ? rawOpts[1] : slideType === 'trueFalse' ? 'خطأ' : 'الخيار الثاني',
+    typeof rawOpts[2] === 'string' ? rawOpts[2] : slideType === 'trueFalse' ? '' : 'الخيار الثالث',
+    typeof rawOpts[3] === 'string' ? rawOpts[3] : slideType === 'trueFalse' ? '' : 'الخيار الرابع',
   ];
   const rawIdx = Number(raw?.correctIndex);
-  const correctIndex = Math.max(0, Math.min(3, Math.round(Number.isFinite(rawIdx) ? rawIdx : 0))) as
+  const maxOptIdx = slideType === 'trueFalse' ? 1 : 3;
+  const correctIndex = Math.max(0, Math.min(maxOptIdx, Math.round(Number.isFinite(rawIdx) ? rawIdx : 0))) as
     | 0
     | 1
     | 2
     | 3;
 
+  const imageChallengeMode =
+    raw?.imageChallengeMode === 'blurToClear' || raw?.imageChallengeMode === 'gradualClear'
+      ? raw.imageChallengeMode
+      : 'normal';
+  const rawBlur = Number(raw?.imageBlurStrength);
+  const imageBlurStrength = Number.isFinite(rawBlur)
+    ? Math.max(10, Math.min(50, Math.round(rawBlur)))
+    : undefined;
+
   return {
     id: typeof raw?.id === 'string' && raw.id ? raw.id : `slide-${Date.now()}-${idx}`,
+    slideType,
     badgeText: typeof raw?.badgeText === 'string' ? raw.badgeText : `السؤال ${idx + 1}`,
     question: typeof raw?.question === 'string' ? raw.question : 'اكتب نص السؤال هنا',
     imageDataUrl: typeof raw?.imageDataUrl === 'string' ? raw.imageDataUrl : undefined,
     imageName: typeof raw?.imageName === 'string' ? raw.imageName : undefined,
+    imageChallengeMode,
+    imageBlurStrength,
     options,
     correctIndex,
     explanationText: typeof raw?.explanationText === 'string' ? raw.explanationText : '',
@@ -269,6 +283,7 @@ export function normalizeLoadedProject(
       Array.isArray(mergedTemplate.prizeLadderAmounts) && mergedTemplate.prizeLadderAmounts.length > 0
         ? mergedTemplate.prizeLadderAmounts
         : DEFAULT_TEMPLATE.prizeLadderAmounts,
+    slideTransition: mergedTemplate.slideTransition || 'fade',
   };
 
   const sanitizedSlides = result.slides.map((s, i) => sanitizeSlide(s, i));

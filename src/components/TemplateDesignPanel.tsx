@@ -31,6 +31,7 @@ import {
   PRESET_BACKDROPS,
   PrizeLadderStyle,
   RevealStyle,
+  SlideTransitionStyle,
   TemplateSettings,
   TimerStyle,
   applyStudioThemePreset,
@@ -776,6 +777,24 @@ export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
             </label>
           )}
         </div>
+
+        <label className="flex flex-col gap-1">
+          <span className="text-xs text-[var(--pmuted)]">حركة الانتقال بين الشرائح (Slide Transition)</span>
+          <select
+            value={template.slideTransition || 'fade'}
+            onChange={(e) =>
+              patch({ slideTransition: e.target.value as SlideTransitionStyle })
+            }
+            className="px-3 py-2 rounded-lg bg-[var(--surface)] border border-[var(--pline)] text-xs text-[var(--ptxt)] focus:border-[#00B050] focus:outline-none"
+          >
+            <option value="none">قطع مباشر (بدون انتقال)</option>
+            <option value="fade">تلاشي ناعم (Fade)</option>
+            <option value="slideLeft">انزلاق سريع لليسار</option>
+            <option value="slideRight">انزلاق سريع لليمين</option>
+            <option value="zoomFade">زوم وتلاشي سينمائي (Zoom)</option>
+            <option value="wipeGold">مسحة ضوئية ذهبية (TV Wipe) ✨</option>
+          </select>
+        </label>
 
         {/* Millionaire Prize Ladder Config */}
         <div className="p-3 rounded-xl bg-[var(--surface)] border border-[var(--pline)] flex flex-col gap-2.5">
