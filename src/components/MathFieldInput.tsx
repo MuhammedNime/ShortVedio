@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Check, Calculator, X } from 'lucide-react';
+import { registerBackHandler } from '../utils/androidBack';
 
 interface MathFieldElement extends HTMLElement {
   value: string;
@@ -50,6 +51,13 @@ export const MathFieldInput: React.FC<MathFieldInputProps> = ({
   const mfRef = useRef<MathFieldElement | null>(null);
   const [latex, setLatex] = useState<string>(() => extractExistingLatex(initialText));
   const [ready, setReady] = useState(false);
+
+  useEffect(() => {
+    return registerBackHandler(() => {
+      onClose();
+      return true;
+    });
+  }, [onClose]);
 
   useEffect(() => {
     let active = true;

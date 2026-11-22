@@ -24,6 +24,303 @@ export class AiApiError extends Error {
   }
 }
 
+const ENV_MAP = (import.meta as unknown as { env?: Record<string, string | undefined> }).env ?? {};
+const BUILD_API_BASE = (ENV_MAP.VITE_API_BASE_URL || '').trim().replace(/\/$/, '');
+const EMBEDDED_APK_GEMINI_KEY = (ENV_MAP.VITE_GEMINI_API_KEY || '').trim();
+
+export function isNativeApkRuntime(): boolean {
+  if (typeof window === 'undefined') return false;
+  const w = window as unknown as {
+    Capacitor?: { isNativePlatform?: () => boolean };
+    AndroidNativeBridge?: unknown;
+  };
+  return Boolean(w.Capacitor?.isNativePlatform?.() || w.AndroidNativeBridge);
+}
+
+function normalizeLatexToSpokenArabic(text: string): string {
+  let out = text;
+  for (let pass = 0; pass < 3; pass++) {
+    out = out.replace(/\\(?:d|t)?frac\{([^{}]+)\}\{([^{}]+)\}/g, ' $1 على $2 ');
+  }
+  out = out.replace(/\\sqrt\{([^{}]+)\}/g, ' الجذر التربيعي لـ $1 ');
+  out = out.replace(/\^\{2\}|\^2/g, ' تربيع ');
+  out = out.replace(/\^\{3\}|\^3/g, ' تكعيب ');
+  out = out.replace(/\^\{([^{}]+)\}/g, ' أس $1 ');
+  out = out.replace(/\^([0-9a-zA-Z])/g, ' أس $1 ');
+  out = out.replace(/_\{([^{}]+)\}/g, ' $1 ');
+  return out
+    .replace(/\\times/g, ' ضرب ')
+    .replace(/\\cdot/g, ' ضرب ')
+    .replace(/\\div/g, ' تقسيم ')
+    .replace(/\\pm/g, ' زائد أو ناقص ')
+    .replace(/\\pi/g, ' باي ')
+    .replace(/\\theta/g, ' ثيتا ')
+    .replace(/\\alpha/g, ' ألفا ')
+    .replace(/\\beta/g, ' بيتا ')
+    .replace(/\\leq/g, ' أصغر من أو يساوي ')
+    .replace(/\\geq/g, ' أكبر من أو يساوي ')
+    .replace(/\\neq/g, ' لا يساوي ')
+    .replace(/\\approx/g, ' يساوي تقريباً ')
+    .replace(/\\infty/g, ' ما لا نهاية ')
+    .replace(/\\circ|\\degree/g, ' درجة ')
+    .replace(/\\left|\\right/g, '')
+    .replace(/\$/g, ' ')
+    .replace(/[{}]/g, ' ')
+    .replace(/\\/g, ' ')
+    .replace(/\+/g, ' زائد ')
+    .replace(/=/g, ' يساوي ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function formatGeminiClientError(err: unknown): AiApiError {
+  const raw = err instanceof Error ? err.message : String(err);
+  const isDailyQuota =
+    raw.includes('PerDay') || raw.includes('per day') || raw.includes('free_tier_requests');
+  if (
+    raw.includes('403') ||
+    raw.includes('PERMISSION_DENIED') ||
+    raw.includes('API_KEY_INVALID') ||
+    raw.includes('API key not valid')
+  ) {
+    return new AiApiError(
+      'مفتاح Gemini API المدمج في التطبيق غير صالح أو مرفوض (403).',
+      403,
+      false
+    );
+  }
+  if (raw.includes('429') || raw.includes('RESOURCE_EXHAUSTED')) {
+    if (isDailyQuota) {
+      return new AiApiError(
+        'اكتملت الحصة اليومية المجانية لتوليد الصوت (10 طلبات يومياً على الباقة المجانية).',
+        429,
+        true
+      );
+    }
+    return new AiApiError('تم تجاوز حد الطلبات مؤقتاً (429). انتظر ثوانٍ وأعد المحاولة.', 429, false);
+  }
+  return new AiApiError(raw || 'تعذر الاتصال بخدمة Gemini.', 500, false);
+}
+
+function wrapPcmBase64ToWavDataUrl(base64Audio: string, mimeType: string): string {
+  if (!mimeType.includes('L16') && !mimeType.includes('pcm')) {
+    return `data:${mimeType};base64,${base64Audio}`;
+  }
+  const binary = atob(base64Audio);
+  const pcmLen = binary.length;
+  const rateMatch = mimeType.match(/rate=(\d+)/);
+  const sampleRate = rateMatch ? Number(rateMatch[1]) : 24000;
+
+  const wavBytes = new Uint8Array(44 + pcmLen);
+  const view = new DataView(wavBytes.buffer);
+  const writeStr = (offset: number, s: string) => {
+    for (let i = 0; i < s.length; i++) wavBytes[offset + i] = s.charCodeAt(i);
+  };
+
+  writeStr(0, 'RIFF');
+  view.setUint32(4, 36 + pcmLen, true);
+  writeStr(8, 'WAVE');
+  writeStr(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeStr(36, 'data');
+  view.setUint32(40, pcmLen, true);
+
+  for (let i = 0; i < pcmLen; i++) {
+    wavBytes[44 + i] = binary.charCodeAt(i);
+  }
+
+  let outBin = '';
+  const CHUNK = 0x8000;
+  for (let i = 0; i < wavBytes.length; i += CHUNK) {
+    outBin += String.fromCharCode(...wavBytes.subarray(i, i + CHUNK));
+  }
+  return `data:audio/wav;base64,${btoa(outBin)}`;
+}
+
+async function generateQuizDirectlyInApk(
+  topic: string,
+  count: number,
+  difficulty: string,
+  contentType: 'general' | 'math'
+): Promise<QuestionSlide[]> {
+  try {
+    const { GoogleGenAI, ThinkingLevel, Type } = await import('@google/genai');
+    const ai = new GoogleGenAI({ apiKey: EMBEDDED_APK_GEMINI_KEY });
+
+    const safeCount = Math.max(1, Math.min(12, Math.round(Number(count) || 3)));
+    const diffLabel = difficulty && difficulty.trim() ? difficulty.trim() : 'متنوع';
+    const isMath =
+      contentType === 'math' ||
+      /رياضيات|جبر|معادل|كسر|كسور|جذر|جذور|حساب|هندسة|مثلث|مشتق|تكامل/i.test(topic);
+
+    const mathGuidelines = isMath
+      ? `\nملاحظات مهمة لأسئلة الرياضيات:
+- ضع التعابير الرياضية والكسور والجذور والأسس بصيغة LaTeX واضحة بين علامتي دولار مثل: $\\frac{3}{4} + \\frac{1}{2}$ أو $\\sqrt{81}$ أو $2x + 5 = 15$ أو $5^{2}$.
+- اجعل الخيارات الأربعة قصيرة وواضحة (سواء رقمية أو بصيغة LaTeX بين $...$).
+- تأكد رياضياً 100% أن الخيار عند correctIndex هو الحل الصحيح الوحيد.`
+      : '';
+
+    const promptText = `الموضوع أو الفكرة المطلوبة: "${topic}"
+عدد الأسئلة المطلوبة: ${safeCount}
+مستوى الصعوبة: ${diffLabel}
+${mathGuidelines}
+
+أنشئ ${safeCount} سؤالاً باللغة العربية الفصحى السلسة والمناسبة لفيديوهات الأسئلة.
+أرجع مصفوفة JSON فقط (JSON Array) بدون أي نص إضافي خارج JSON، بحيث يحتوي كل عنصر على:
+- badgeText: عنوان قصير للشارة العلوية (مثال: تحدي المعلومات · سؤال 1)
+- question: نص السؤال القصير والمشوق (أقل من 15 كلمة)
+- options: مصفوفة من 4 خيارات نصية قصيرة بالضبط
+- correctIndex: رقم صحيح من 0 إلى 3 يمثل الإجابة الصحيحة
+- explanationText: توضيح قصير جداً للإجابة (أقل من 12 كلمة)`;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-3.1-flash-lite',
+      contents: promptText,
+      config: {
+        thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
+        systemInstruction:
+          'أنت خبير في إعداد أسئلة المسابقات والرياضيات لفيديوهات يوتيوب باللغة العربية. التزم بالدقة العلمية والرياضية، الاختصار الواضح، وتنويع موضع الإجابة الصحيحة بين 0 و 3.',
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              badgeText: { type: Type.STRING },
+              question: { type: Type.STRING },
+              options: { type: Type.ARRAY, items: { type: Type.STRING } },
+              correctIndex: { type: Type.INTEGER },
+              explanationText: { type: Type.STRING },
+            },
+            required: ['badgeText', 'question', 'options', 'correctIndex', 'explanationText'],
+          },
+        },
+      },
+    });
+
+    const rawText = (response.text ?? '[]').trim();
+    const cleanedJson = rawText
+      .replace(/^```(?:json)?\s*/i, '')
+      .replace(/\s*```$/i, '')
+      .trim();
+    const parsed = JSON.parse(cleanedJson) as Array<{
+      badgeText?: string;
+      question?: string;
+      options?: string[];
+      correctIndex?: number;
+      explanationText?: string;
+    }>;
+
+    const normalized = parsed
+      .filter((item) => item && item.question && Array.isArray(item.options) && item.options.length >= 4)
+      .slice(0, safeCount)
+      .map((item, idx) => {
+        const opts = item.options!.slice(0, 4).map((o) => String(o).trim()) as [
+          string,
+          string,
+          string,
+          string
+        ];
+        const numIdx = Number(item.correctIndex);
+        const cIdx = Math.max(0, Math.min(3, Math.round(Number.isFinite(numIdx) ? numIdx : 0))) as
+          | 0
+          | 1
+          | 2
+          | 3;
+        return {
+          id: `ai-slide-${Date.now()}-${idx}`,
+          badgeText: (item.badgeText ?? `السؤال ${idx + 1}`).trim(),
+          question: item.question!.trim(),
+          options: opts,
+          correctIndex: cIdx,
+          explanationText: (item.explanationText ?? '').trim(),
+        };
+      });
+
+    if (normalized.length === 0) {
+      throw new AiApiError('لم يتمكن الذكاء الاصطناعي من توليد أسئلة صالحة، حاول صياغة الفكرة بشكل أوضح.', 502);
+    }
+    return normalized;
+  } catch (err) {
+    if (err instanceof AiApiError) throw err;
+    throw formatGeminiClientError(err);
+  }
+}
+
+async function generateTtsDirectlyInApk(
+  text: string,
+  voiceName: AiVoiceName,
+  fileName: string,
+  style?: string
+): Promise<SlideAudioClip> {
+  const cleanText = normalizeLatexToSpokenArabic(text) || text.trim();
+  if (!cleanText) {
+    throw new AiApiError('النص المطلوب تحويله إلى صوت فارغ.', 400);
+  }
+
+  const allowedVoices = ['Kore', 'Puck', 'Charon', 'Fenrir', 'Zephyr'];
+  const chosenVoice = allowedVoices.includes(voiceName) ? voiceName : 'Kore';
+
+  try {
+    const { GoogleGenAI } = await import('@google/genai');
+    const ai = new GoogleGenAI({ apiKey: EMBEDDED_APK_GEMINI_KEY });
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-3.8-flash-lite-tts',
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            {
+              text: cleanText,
+              speechMetadata: {
+                style:
+                  style || 'Clear, energetic, articulate Modern Standard Arabic quiz show presenter',
+              },
+            },
+          ],
+        },
+      ],
+      config: {
+        responseModalities: ['AUDIO'],
+        speechConfig: {
+          voiceConfig: {
+            prebuiltVoiceConfig: {
+              voiceName: chosenVoice,
+            },
+          },
+        },
+      },
+    });
+
+    const parts = response.candidates?.[0]?.content?.parts ?? [];
+    const audioPart = parts.find((p) => p.inlineData?.data);
+    const base64Audio = audioPart?.inlineData?.data;
+    const mimeType = audioPart?.inlineData?.mimeType || 'audio/wav';
+
+    if (!base64Audio) {
+      throw new AiApiError('تعذر توليد الصوت من النموذج حالياً.', 502);
+    }
+
+    const dataUrl = wrapPcmBase64ToWavDataUrl(base64Audio, mimeType);
+    const duration = await soundEngine.getAudioDuration(dataUrl);
+    return {
+      fileName,
+      dataUrl,
+      duration: duration > 0 ? duration : 1.5,
+    };
+  } catch (err) {
+    if (err instanceof AiApiError) throw err;
+    throw formatGeminiClientError(err);
+  }
+}
+
 async function parseJsonSafe<T>(res: Response): Promise<T> {
   const text = await res.text();
   try {
@@ -37,28 +334,29 @@ async function parseJsonSafe<T>(res: Response): Promise<T> {
       );
     }
     throw new AiApiError(
-      res.ok
-        ? 'استجابة غير صالحة من الخادم.'
-        : `تعذر الاتصال بالخادم (رمز ${res.status}).`,
+      res.ok ? 'استجابة غير صالحة من الخادم.' : `تعذر الاتصال بالخادم (رمز ${res.status}).`,
       res.status,
       false
     );
   }
 }
 
-const API_BASE = ((import.meta as unknown as { env?: Record<string, string | undefined> }).env?.VITE_API_BASE_URL || '')
-  .trim()
-  .replace(/\/$/, '');
-
 function buildApiUrl(path: string): string {
-  return API_BASE ? `${API_BASE}${path}` : path;
+  return BUILD_API_BASE ? `${BUILD_API_BASE}${path}` : path;
 }
 
 async function fetchAi(path: string, payload: unknown): Promise<Response> {
+  if (isNativeApkRuntime() && !BUILD_API_BASE) {
+    throw new AiApiError(
+      'ميزة الذكاء الاصطناعي داخل الـ APK تحتاج إضافة سر GEMINI_API_KEY في GitHub (Settings > Secrets and variables > Actions) قبل بناء الـ APK.',
+      0,
+      false
+    );
+  }
   try {
     return await fetch(buildApiUrl(path), {
       method: 'POST',
-      credentials: API_BASE ? 'omit' : 'same-origin',
+      credentials: BUILD_API_BASE ? 'omit' : 'same-origin',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
@@ -77,6 +375,10 @@ export async function generateAiQuizSlides(
   difficulty: string,
   contentType: 'general' | 'math' = 'general'
 ): Promise<QuestionSlide[]> {
+  if (isNativeApkRuntime() && EMBEDDED_APK_GEMINI_KEY && !BUILD_API_BASE) {
+    return generateQuizDirectlyInApk(topic, count, difficulty, contentType);
+  }
+
   const res = await fetchAi('/api/ai/generate-quiz', {
     topic,
     count,
@@ -115,6 +417,10 @@ export async function generateTtsClip(
   fileName: string,
   style?: string
 ): Promise<SlideAudioClip> {
+  if (isNativeApkRuntime() && EMBEDDED_APK_GEMINI_KEY && !BUILD_API_BASE) {
+    return generateTtsDirectlyInApk(text, voiceName, fileName, style);
+  }
+
   let lastError: Error | null = null;
 
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -129,7 +435,6 @@ export async function generateTtsClip(
 
       if (!res.ok || !data.dataUrl) {
         const errMsg = data.error || 'تعذر توليد الصوت بالذكاء الاصطناعي.';
-        // Never retry daily quota exhaustion or auth errors
         if (data.quotaExhausted || res.status === 403 || res.status === 400) {
           throw new AiApiError(errMsg, res.status, Boolean(data.quotaExhausted));
         }

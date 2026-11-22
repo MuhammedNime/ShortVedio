@@ -2,7 +2,12 @@ import React, { useEffect, useRef, useState } from 'react';
 import { CheckCircle2, Download, Film, X } from 'lucide-react';
 import { ExportProgress, ExportResult, exportQuizVideo } from '../canvas/videoExporter';
 import { QuizProject, getCanvasDimensions } from '../types/quiz';
-import { canShareNatively, saveOrDownloadBlob, shareBlobNatively } from '../utils/nativeDownload';
+import {
+  canShareNatively,
+  isAndroidNativeApp,
+  saveOrDownloadBlob,
+  shareBlobNatively,
+} from '../utils/nativeDownload';
 
 interface ExportVideoModalProps {
   isOpen: boolean;
@@ -24,6 +29,9 @@ export const ExportVideoModal: React.FC<ExportVideoModalProps> = ({
   });
   const [result, setResult] = useState<ExportResult | null>(null);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  const [exportedFileName, setExportedFileName] = useState<string>('');
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveNotice, setSaveNotice] = useState<string>('');
   const [errorMsg, setErrorMsg] = useState<string>('');
   const abortRef = useRef<AbortController | null>(null);
   const projectRef = useRef(project);
@@ -40,6 +48,9 @@ export const ExportVideoModal: React.FC<ExportVideoModalProps> = ({
       });
       setStatus('idle');
       setResult(null);
+      setExportedFileName('');
+      setIsSaving(false);
+      setSaveNotice('');
       setErrorMsg('');
       return;
     }
@@ -48,6 +59,7 @@ export const ExportVideoModal: React.FC<ExportVideoModalProps> = ({
     const controller = new AbortController();
     abortRef.current = controller;
     setStatus('rendering');
+    setSaveNotice('');
     setErrorMsg('');
 
     void exportQuizVideo(
@@ -58,12 +70,29 @@ export const ExportVideoModal: React.FC<ExportVideoModalProps> = ({
       (p) => setProgress(p),
       controller.signal
     )
-      .then((res) => {
+      .then(async (res) => {
         if (controller.signal.aborted) return;
         const url = URL.createObjectURL(res.blob);
+        const generatedName = `youtube-short-quiz-${Date.now()}.${res.extension || 'webm'}`;
         setResult(res);
         setVideoUrl(url);
+        setExportedFileName(generatedName);
         setStatus('done');
+
+        if (isAndroidNativeApp()) {
+          setIsSaving(true);
+          const saveRes = await saveOrDownloadBlob(res.blob, generatedName, res.mimeType);
+          if (!controller.signal.aborted) {
+            setIsSaving(false);
+            if (saveRes.ok) {
+              setSaveNotice(
+                `تم حفظ الفيديو تلقائياً في التنزيلات: Downloads/ShortsQuizStudio/${saveRes.fileName || generatedName}`
+              );
+            } else if (saveRes.error) {
+              setSaveNotice(`تعذر الحفظ التلقائي (${saveRes.error})، جرّب زر مشاركة / حفظ.`);
+            }
+          }
+        }
       })
       .catch((err: unknown) => {
         if (controller.signal.aborted) return;
@@ -78,24 +107,36 @@ export const ExportVideoModal: React.FC<ExportVideoModalProps> = ({
 
   if (!isOpen) return null;
 
-  const fileName = `youtube-short-quiz-${Date.now()}.${result?.extension || 'webm'}`;
+  const fileName = exportedFileName || `youtube-short-quiz-${Date.now()}.${result?.extension || 'webm'}`;
 
   const handleDownload = async () => {
-    if (!result) return;
+    if (!result || isSaving) return;
+    setIsSaving(true);
+    setSaveNotice('');
     const res = await saveOrDownloadBlob(result.blob, fileName, result.mimeType);
-    if (!res.ok && res.error) {
-      setErrorMsg(`تعذر حفظ الفيديو: ${res.error}`);
+    setIsSaving(false);
+    if (res.ok) {
+      setSaveNotice(
+        res.savedNatively
+          ? `تم حفظ الفيديو في مجلد التنزيلات: Downloads/ShortsQuizStudio/${res.fileName || fileName}`
+          : 'بدأ تنزيل الفيديو على جهازك.'
+      );
+    } else if (res.error) {
+      setSaveNotice(`تعذر حفظ الفيديو: ${res.error}`);
     }
   };
 
   const canNativeShare = !!result && canShareNatively(fileName, result.mimeType, result.blob);
 
   const handleShareVideo = async () => {
-    if (!result) return;
+    if (!result || isSaving) return;
     try {
+      setIsSaving(true);
       await shareBlobNatively(result.blob, fileName, result.mimeType, 'فيديو شورتس الأسئلة');
     } catch {
       // User cancelled share sheet
+    } finally {
+      setIsSaving(false);
     }
   };
 
@@ -185,20 +226,28 @@ export const ExportVideoModal: React.FC<ExportVideoModalProps> = ({
                 </span>
               </div>
 
+              {saveNotice && (
+                <div className="px-3 py-2 rounded-xl bg-[#00B050]/12 border border-[#00B050]/35 text-xs text-[#00B050] dark:text-[#6ee7b7] leading-relaxed break-all">
+                  {saveNotice}
+                </div>
+              )}
+
               <div className="flex flex-wrap items-center gap-2.5">
                 <button
                   type="button"
+                  disabled={isSaving}
                   onClick={() => void handleDownload()}
-                  className="flex-1 flex items-center justify-center gap-2 py-3 rounded-xl bg-[#00B050] hover:bg-[#00c85b] text-white text-sm font-bold transition-colors cursor-pointer"
+                  className="flex-1 flex items-center justify-center gap-2 py-3 rounded-xl bg-[#00B050] hover:bg-[#00c85b] disabled:opacity-60 text-white text-sm font-bold transition-colors cursor-pointer"
                 >
                   <Download className="w-4 h-4" />
-                  <span>تنزيل الفيديو للجهاز</span>
+                  <span>{isSaving ? 'جارٍ الحفظ...' : 'تنزيل الفيديو للجهاز'}</span>
                 </button>
                 {canNativeShare && (
                   <button
                     type="button"
+                    disabled={isSaving}
                     onClick={() => void handleShareVideo()}
-                    className="px-4 py-3 rounded-xl bg-[var(--surface)] border border-[#00B050]/40 text-[#00B050] dark:text-[#6ee7b7] text-sm font-bold transition-colors cursor-pointer"
+                    className="px-4 py-3 rounded-xl bg-[var(--surface)] border border-[#00B050]/40 disabled:opacity-60 text-[#00B050] dark:text-[#6ee7b7] text-sm font-bold transition-colors cursor-pointer"
                   >
                     مشاركة / حفظ
                   </button>

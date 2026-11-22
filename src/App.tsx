@@ -38,6 +38,7 @@ import {
   getTotalDuration,
 } from './types/quiz';
 import { isAppLockEnabled } from './utils/appLock';
+import { setRootBackHandler } from './utils/androidBack';
 
 type StudioTab = 'slides' | 'ai' | 'template' | 'audio' | 'import';
 type MobileView = 'editor' | 'preview';
@@ -46,6 +47,7 @@ export default function App() {
   const [project, setProject] = useState<QuizProject>(() => createDefaultProject());
   const [isLoaded, setIsLoaded] = useState(false);
   const [activeTab, setActiveTab] = useState<StudioTab>('slides');
+  const [tabHistory, setTabHistory] = useState<StudioTab[]>([]);
   const [mobileView, setMobileView] = useState<MobileView>('editor');
   const [activeSlideIndex, setActiveSlideIndex] = useState(0);
   const [isExportOpen, setIsExportOpen] = useState(false);
@@ -54,6 +56,47 @@ export default function App() {
   const [isLocked, setIsLocked] = useState(() => isAppLockEnabled());
   const [isLockModalOpen, setIsLockModalOpen] = useState(false);
   const [isProjectsOpen, setIsProjectsOpen] = useState(false);
+
+  const navigateToTab = useCallback((nextTab: StudioTab) => {
+    setActiveTab((prev) => {
+      if (prev !== nextTab) {
+        setTabHistory((hist) => [...hist.slice(-10), prev]);
+      }
+      return nextTab;
+    });
+  }, []);
+
+  useEffect(() => {
+    return setRootBackHandler(() => {
+      if (isExportOpen) {
+        setIsExportOpen(false);
+        return true;
+      }
+      if (isProjectsOpen) {
+        setIsProjectsOpen(false);
+        return true;
+      }
+      if (isLockModalOpen) {
+        setIsLockModalOpen(false);
+        return true;
+      }
+      if (mobileView === 'preview') {
+        setMobileView('editor');
+        return true;
+      }
+      if (tabHistory.length > 0) {
+        const prevTab = tabHistory[tabHistory.length - 1];
+        setTabHistory((hist) => hist.slice(0, -1));
+        setActiveTab(prevTab);
+        return true;
+      }
+      if (activeTab !== 'slides') {
+        setActiveTab('slides');
+        return true;
+      }
+      return false;
+    });
+  }, [isExportOpen, isProjectsOpen, isLockModalOpen, mobileView, tabHistory, activeTab]);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -197,7 +240,7 @@ export default function App() {
               <button
                 key={tab.id}
                 type="button"
-                onClick={() => setActiveTab(tab.id)}
+                onClick={() => navigateToTab(tab.id)}
                 className={`relative py-5 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                   active ? 'text-[var(--ptxt)] font-bold' : 'hover:text-[var(--ptxt)]'
                 }`}
@@ -272,7 +315,7 @@ export default function App() {
                 <button
                   key={t.id}
                   type="button"
-                  onClick={() => setActiveTab(t.id as StudioTab)}
+                  onClick={() => navigateToTab(t.id as StudioTab)}
                   className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold whitespace-nowrap shrink-0 cursor-pointer ${
                     active
                       ? 'bg-[#00B050]/18 text-[#00B050] dark:text-[#6ee7b7] border border-[#00B050]/45'
