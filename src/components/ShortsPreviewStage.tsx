@@ -132,7 +132,7 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
 
   useEffect(() => {
     if (!hasUserScrubbedRef.current && !isPlayingRef.current) {
-      const schedules = computeProjectTimeline(slides, timing, audio);
+      const schedules = computeProjectTimeline(slides, timing, audio, template);
       const sched = schedules[activeSlideIndex] ?? schedules[0];
       if (sched) {
         const showcaseTime = Math.min(
@@ -142,7 +142,7 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
         syncTimeUi(showcaseTime, totalDuration, true);
       }
     }
-  }, [slides, timing, audio, activeSlideIndex, totalDuration]);
+  }, [slides, timing, audio, template, activeSlideIndex, totalDuration]);
 
   useEffect(() => {
     if (totalDuration > 0 && timeRef.current > totalDuration) {
@@ -158,7 +158,7 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
   const prevSlideIdxRef = useRef(activeSlideIndex);
   useEffect(() => {
     if (prevSlideIdxRef.current !== activeSlideIndex && !isPlayingRef.current) {
-      const schedules = computeProjectTimeline(slides, timing, audio);
+      const schedules = computeProjectTimeline(slides, timing, audio, template);
       const sched = schedules[activeSlideIndex];
       const target = sched
         ? sched.startTime + sched.tThinkingStart + Math.min(1.1, timing.thinkingDuration * 0.25)
@@ -239,7 +239,8 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
             nextT,
             slidesRef.current,
             timingRef.current,
-            audioRef.current
+            audioRef.current,
+            templateRef.current
           );
           const duckIfNeeded = (durSec: number) => {
             if (timingRef.current.autoDuckMusic !== false && durSec > 0.25) {
@@ -296,7 +297,8 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
           nextT,
           slidesRef.current,
           timingRef.current,
-          audioRef.current
+          audioRef.current,
+          templateRef.current
         );
         if (info && onActiveSlideChange && info.slideIndex !== prevSlideIdxRef.current) {
           prevSlideIdxRef.current = info.slideIndex;
@@ -344,7 +346,7 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
     soundEngine.getContext();
     if (!isPlaying && (!hasUserScrubbedRef.current || timeRef.current >= totalDuration - 0.05)) {
       hasUserScrubbedRef.current = true;
-      const schedules = computeProjectTimeline(slides, timing, audio);
+      const schedules = computeProjectTimeline(slides, timing, audio, template);
       const sched = schedules[activeSlideIndex];
       const startAt = timeRef.current >= totalDuration - 0.05 ? 0 : sched ? sched.startTime : 0;
       timeRef.current = startAt;
@@ -363,7 +365,7 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
 
   const handleStepSlide = (delta: number) => {
     const nextIdx = Math.max(0, Math.min(slides.length - 1, activeSlideIndex + delta));
-    const schedules = computeProjectTimeline(slides, timing, audio);
+    const schedules = computeProjectTimeline(slides, timing, audio, template);
     const sched = schedules[nextIdx];
     if (sched && onActiveSlideChange) {
       hasUserScrubbedRef.current = true;
@@ -398,15 +400,19 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
     });
   };
 
-  const jumpToPhase = (phase: 'question' | 'opt1' | 'opt4' | 'timer' | 'suspense' | 'reveal' | 'end') => {
+  const jumpToPhase = (
+    phase: 'intro' | 'question' | 'opt1' | 'opt4' | 'timer' | 'suspense' | 'reveal' | 'end'
+  ) => {
     hasUserScrubbedRef.current = true;
     setIsPlaying(false);
-    const schedules = computeProjectTimeline(slides, timing, audio);
+    const schedules = computeProjectTimeline(slides, timing, audio, template);
     const sched = schedules[activeSlideIndex] ?? schedules[0];
     if (!sched) return;
 
     let target = sched.startTime + sched.tQuestionStart + 0.36;
-    if (phase === 'opt1') {
+    if (phase === 'intro') {
+      target = Math.min(0.45, totalDuration);
+    } else if (phase === 'opt1') {
       target = sched.startTime + sched.tOptionStarts[0] + 0.36;
     } else if (phase === 'opt4') {
       target = sched.startTime + sched.tOptionStarts[3] + 0.36;
@@ -417,7 +423,7 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
     } else if (phase === 'reveal') {
       target = sched.startTime + sched.tRevealStart + 0.5;
     } else if (phase === 'end') {
-      const contentEnd = getSlidesContentDuration(slides, timing, audio);
+      const contentEnd = getSlidesContentDuration(slides, timing, audio, template);
       target = Math.min(totalDuration, contentEnd + 0.8);
     }
 
@@ -449,7 +455,11 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
     }
   };
 
-  const phases: { id: 'question' | 'opt1' | 'opt4' | 'timer' | 'suspense' | 'reveal' | 'end'; label: string }[] = [
+  const phases: {
+    id: 'intro' | 'question' | 'opt1' | 'opt4' | 'timer' | 'suspense' | 'reveal' | 'end';
+    label: string;
+  }[] = [
+    ...(template.showIntroHook ? [{ id: 'intro' as const, label: 'المقدمة' }] : []),
     { id: 'question', label: 'السؤال' },
     { id: 'opt1', label: 'خيار 1' },
     { id: 'opt4', label: 'كل الخيارات' },

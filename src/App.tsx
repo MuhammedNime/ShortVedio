@@ -29,10 +29,11 @@ import {
   saveProjectToStore,
 } from './storage/projectStore';
 import {
-  CHANNEL_THEME_ORDER,
   QuestionSlide,
   QuizProject,
+  STUDIO_THEME_ORDER,
   applyChannelThemePreset,
+  applyStudioThemePreset,
   createDefaultProject,
   getCanvasDimensions,
   getTotalDuration,
@@ -185,14 +186,12 @@ export default function App() {
 
   const handleCycleChannelTheme = useCallback(() => {
     setProject((prev) => {
-      const currentIdx = CHANNEL_THEME_ORDER.indexOf(
-        prev.template.presetId as 'channelSand' | 'channelNavy' | 'channelEmerald' | 'channelMath'
-      );
+      const currentIdx = STUDIO_THEME_ORDER.indexOf(prev.template.presetId);
       const nextId =
-        CHANNEL_THEME_ORDER[(currentIdx + 1) % CHANNEL_THEME_ORDER.length];
+        STUDIO_THEME_ORDER[(currentIdx + 1) % STUDIO_THEME_ORDER.length];
       return {
         ...prev,
-        template: applyChannelThemePreset(prev.template, nextId),
+        template: applyStudioThemePreset(prev.template, nextId),
       };
     });
   }, []);

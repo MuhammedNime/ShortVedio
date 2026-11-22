@@ -1,6 +1,8 @@
 import {
   AnimationStyle,
   AudioSettings,
+  BoxBorderStyle,
+  BoxShapeStyle,
   PRESET_BACKDROPS,
   QuestionSlide,
   SlideSchedule,
@@ -8,6 +10,8 @@ import {
   TimingSettings,
   computeProjectTimeline,
   getCanvasDimensions,
+  getIntroHookDuration,
+  getSlidePrizeTiers,
   getSlidesContentDuration,
 } from '../types/quiz';
 import { drawSmartQuizText, hasMathSyntax } from './mathCanvasRenderer';
@@ -34,10 +38,11 @@ export function getSlideTimeInfo(
   globalTime: number,
   slides: QuestionSlide[],
   timing: TimingSettings,
-  audio: AudioSettings
+  audio: AudioSettings,
+  template?: TemplateSettings
 ): SlideTimeInfo | null {
   if (slides.length === 0) return null;
-  const schedules = computeProjectTimeline(slides, timing, audio);
+  const schedules = computeProjectTimeline(slides, timing, audio, template);
 
   let chosen = schedules[schedules.length - 1];
   for (let i = 0; i < schedules.length; i++) {
@@ -63,12 +68,13 @@ export function collectSoundEventsInInterval(
   currTime: number,
   slides: QuestionSlide[],
   timing: TimingSettings,
-  audio: AudioSettings
+  audio: AudioSettings,
+  template?: TemplateSettings
 ): TimelineSoundEvent[] {
   const events: TimelineSoundEvent[] = [];
   if (currTime <= prevTime || slides.length === 0) return events;
 
-  const schedules = computeProjectTimeline(slides, timing, audio);
+  const schedules = computeProjectTimeline(slides, timing, audio, template);
 
   for (const sched of schedules) {
     const sIdx = sched.slideIndex;
@@ -245,7 +251,7 @@ function isBackgroundDark(template: TemplateSettings): boolean {
     return isColorDark(template.solidBgColor || '#0c0c0c', template.bgDimOpacity);
   }
   if (template.backgroundType === 'preset') {
-    if (template.presetId === 'channelSand') {
+    if (template.presetId === 'channelSand' || template.presetId === 'parchmentGold') {
       return template.bgDimOpacity >= 0.35;
     }
     return true;
@@ -275,6 +281,30 @@ function drawRoundedRect(
   ctx.closePath();
 }
 
+function traceBoxPath(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  r: number,
+  boxStyle: BoxShapeStyle = 'flat'
+): void {
+  if (boxStyle === 'millionaireHex') {
+    const tip = Math.min(w * 0.14, Math.max(22, h * 0.44), 48);
+    ctx.beginPath();
+    ctx.moveTo(x + tip, y);
+    ctx.lineTo(x + w - tip, y);
+    ctx.lineTo(x + w, y + h / 2);
+    ctx.lineTo(x + w - tip, y + h);
+    ctx.lineTo(x + tip, y + h);
+    ctx.lineTo(x, y + h / 2);
+    ctx.closePath();
+    return;
+  }
+  drawRoundedRect(ctx, x, y, w, h, r);
+}
+
 function applyBoxGloss(
   ctx: CanvasRenderingContext2D,
   x: number,
@@ -282,9 +312,10 @@ function applyBoxGloss(
   w: number,
   h: number,
   r: number,
-  enhanced = false
+  enhanced = false,
+  boxStyle: BoxShapeStyle = 'flat'
 ): void {
-  drawRoundedRect(ctx, x, y, w, h, r);
+  traceBoxPath(ctx, x, y, w, h, r, boxStyle);
   const grad = ctx.createLinearGradient(0, y, 0, y + h);
   grad.addColorStop(0, enhanced ? 'rgba(255, 255, 255, 0.28)' : 'rgba(255, 255, 255, 0.22)');
   grad.addColorStop(0.48, enhanced ? 'rgba(255, 255, 255, 0.06)' : 'rgba(255, 255, 255, 0.04)');
@@ -293,10 +324,261 @@ function applyBoxGloss(
   ctx.fill();
 
   if (enhanced && w > 24 && h > 24) {
-    drawRoundedRect(ctx, x + 3, y + 3, w - 6, h - 6, Math.max(0, r - 3));
+    traceBoxPath(ctx, x + 3, y + 3, w - 6, h - 6, Math.max(0, r - 3), boxStyle);
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.22)';
     ctx.lineWidth = 2;
     ctx.stroke();
+  }
+}
+
+function darkenHex(hex: string, amount = 0.38): string {
+  const [r, g, b] = hexToRgbTuple(hex);
+  const f = clamp01(1 - amount);
+  return `rgb(${Math.round(r * f)}, ${Math.round(g * f)}, ${Math.round(b * f)})`;
+}
+
+function resolveBoxStrokeStyle(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  baseColor: string,
+  borderStyle: BoxBorderStyle
+): string | CanvasGradient {
+  if (borderStyle === 'gradientGold') {
+    const grad = ctx.createLinearGradient(x, y, x + w, y + h);
+    grad.addColorStop(0, '#fff3b0');
+    grad.addColorStop(0.28, '#e5b84b');
+    grad.addColorStop(0.5, '#9e6f18');
+    grad.addColorStop(0.75, '#f6dc88');
+    grad.addColorStop(1, '#c8952c');
+    return grad;
+  }
+  if (borderStyle === 'gradientNeon') {
+    const grad = ctx.createLinearGradient(x, y, x + w, y + h);
+    grad.addColorStop(0, '#22d3ee');
+    grad.addColorStop(0.5, '#a855f7');
+    grad.addColorStop(1, '#ec4899');
+    return grad;
+  }
+  return baseColor;
+}
+
+function drawStyledBoxContainer(
+  ctx: CanvasRenderingContext2D,
+  params: {
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+    radius: number;
+    fillColorHex: string;
+    fillRgba: string;
+    opacity: number;
+    borderColor: string;
+    borderWidth: number;
+    boxStyle: BoxShapeStyle;
+    borderStyle: BoxBorderStyle;
+    boxGloss: boolean;
+    enhanced: boolean;
+    shadowIntensity: number;
+    glowIntensity: number;
+    isHighlighted?: boolean;
+    shadowOffsetY?: number;
+    drawFill?: boolean;
+    drawBorder?: boolean;
+    wingExtensions?: boolean;
+  }
+): void {
+  const {
+    x,
+    y,
+    w,
+    h,
+    radius,
+    fillColorHex,
+    fillRgba,
+    opacity,
+    borderColor,
+    borderWidth,
+    boxStyle,
+    borderStyle,
+    boxGloss,
+    enhanced,
+    shadowIntensity,
+    glowIntensity,
+    isHighlighted = false,
+    shadowOffsetY = 9,
+    drawFill = true,
+    drawBorder = true,
+    wingExtensions = false,
+  } = params;
+
+  const isMillionaire = boxStyle === 'millionaireHex';
+
+  // Optional side wing lines for Millionaire hexagonal frames
+  if (isMillionaire && wingExtensions && drawBorder) {
+    ctx.save();
+    const wingLen = 54;
+    const wingGradL = ctx.createLinearGradient(x - wingLen, 0, x, 0);
+    wingGradL.addColorStop(0, 'rgba(229, 184, 75, 0)');
+    wingGradL.addColorStop(1, borderColor || '#e5b84b');
+    ctx.strokeStyle = wingGradL;
+    ctx.lineWidth = Math.max(2.5, borderWidth * 0.65);
+    ctx.beginPath();
+    ctx.moveTo(x - wingLen, y + h / 2);
+    ctx.lineTo(x + 2, y + h / 2);
+    ctx.stroke();
+
+    const wingGradR = ctx.createLinearGradient(x + w, 0, x + w + wingLen, 0);
+    wingGradR.addColorStop(0, borderColor || '#e5b84b');
+    wingGradR.addColorStop(1, 'rgba(229, 184, 75, 0)');
+    ctx.strokeStyle = wingGradR;
+    ctx.beginPath();
+    ctx.moveTo(x + w - 2, y + h / 2);
+    ctx.lineTo(x + w + wingLen, y + h / 2);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  if (drawFill) {
+    // 1. Optional Outer Glow / Enhanced Halo
+    if (glowIntensity > 0.02 || isHighlighted) {
+      const gAlpha = isHighlighted ? Math.max(0.32, glowIntensity * 0.45) : glowIntensity * 0.34;
+      traceBoxPath(ctx, x - 6, y - 6, w + 12, h + 12, radius + 4, boxStyle);
+      ctx.fillStyle = hexToRgba(borderColor || '#EDD6A2', clamp01(gAlpha));
+      ctx.fill();
+    } else if (enhanced && boxStyle === 'flat') {
+      traceBoxPath(ctx, x - 5, y - 5, w + 10, h + 10, radius + 4, boxStyle);
+      ctx.fillStyle = hexToRgba(borderColor || '#FFFFFF', 0.14);
+      ctx.fill();
+    }
+
+    // 2. Drop Shadow
+    if (shadowIntensity > 0.02) {
+      const sOff = Math.round(shadowOffsetY * Math.min(1.5, Math.max(0.2, shadowIntensity)));
+      traceBoxPath(ctx, x, y + sOff, w, h, radius, boxStyle);
+      const baseAlpha = enhanced ? 0.34 : 0.22;
+      ctx.fillStyle = `rgba(0, 0, 0, ${clamp01(baseAlpha * shadowIntensity).toFixed(3)})`;
+      ctx.fill();
+    }
+
+    // 3. 3D Extruded Bottom Lip for bevel3d
+    if (boxStyle === 'bevel3d') {
+      const lipDepth = 11;
+      traceBoxPath(ctx, x, y + lipDepth, w, h, radius, boxStyle);
+      ctx.fillStyle = darkenHex(fillColorHex, 0.42);
+      ctx.fill();
+    }
+
+    // 4. Main Box Body Fill
+    traceBoxPath(ctx, x, y, w, h, radius, boxStyle);
+    if (boxStyle === 'glass') {
+      const glassGrad = ctx.createLinearGradient(x, y, x + w, y + h);
+      const baseAlpha = Math.max(0.22, Math.min(0.75, opacity * 0.65));
+      glassGrad.addColorStop(0, hexToRgba(fillColorHex, Math.min(0.85, baseAlpha + 0.14)));
+      glassGrad.addColorStop(0.5, hexToRgba(fillColorHex, baseAlpha));
+      glassGrad.addColorStop(1, hexToRgba(fillColorHex, Math.min(0.85, baseAlpha + 0.08)));
+      ctx.fillStyle = glassGrad;
+      ctx.fill();
+
+      // Frosted specular streak
+      ctx.save();
+      traceBoxPath(ctx, x, y, w, h, radius, boxStyle);
+      ctx.clip();
+      const streak = ctx.createLinearGradient(x, y, x + w * 0.6, y + h);
+      streak.addColorStop(0, 'rgba(255, 255, 255, 0.26)');
+      streak.addColorStop(0.45, 'rgba(255, 255, 255, 0.05)');
+      streak.addColorStop(1, 'rgba(255, 255, 255, 0)');
+      ctx.fillStyle = streak;
+      ctx.fillRect(x, y, w, h);
+      ctx.restore();
+    } else if (boxStyle === 'neon') {
+      ctx.save();
+      ctx.shadowColor = borderColor || '#22d3ee';
+      ctx.shadowBlur = Math.round(14 + glowIntensity * 26);
+      ctx.fillStyle = fillRgba;
+      ctx.fill();
+      ctx.restore();
+    } else if (boxStyle === 'millionaireHex') {
+      const hexGrad = ctx.createLinearGradient(0, y, 0, y + h);
+      hexGrad.addColorStop(0, hexToRgba(fillColorHex, Math.min(1, opacity)));
+      hexGrad.addColorStop(0.5, fillRgba);
+      hexGrad.addColorStop(1, darkenHex(fillColorHex, 0.28));
+      ctx.fillStyle = hexGrad;
+      ctx.fill();
+    } else {
+      ctx.fillStyle = fillRgba;
+      ctx.fill();
+    }
+
+    // 5. Recessed Inner Hollow (تجويف للداخل)
+    if (boxStyle === 'inset') {
+      ctx.save();
+      traceBoxPath(ctx, x, y, w, h, radius, boxStyle);
+      ctx.clip();
+
+      // Top inner shadow
+      const topShadow = ctx.createLinearGradient(0, y, 0, y + Math.min(40, h * 0.42));
+      topShadow.addColorStop(0, 'rgba(0, 0, 0, 0.42)');
+      topShadow.addColorStop(1, 'rgba(0, 0, 0, 0)');
+      ctx.fillStyle = topShadow;
+      ctx.fillRect(x, y, w, Math.min(40, h * 0.42));
+
+      // Bottom inner specular rim
+      const botLight = ctx.createLinearGradient(0, y + h - Math.min(28, h * 0.3), 0, y + h);
+      botLight.addColorStop(0, 'rgba(255, 255, 255, 0)');
+      botLight.addColorStop(1, 'rgba(255, 255, 255, 0.22)');
+      ctx.fillStyle = botLight;
+      ctx.fillRect(x, y + h - Math.min(28, h * 0.3), w, Math.min(28, h * 0.3));
+
+      // Recessed inner bevel stroke
+      if (w > 24 && h > 24) {
+        traceBoxPath(ctx, x + 5, y + 5, w - 10, h - 10, Math.max(0, radius - 5), boxStyle);
+        ctx.strokeStyle = 'rgba(0, 0, 0, 0.24)';
+        ctx.lineWidth = 3;
+        ctx.stroke();
+      }
+      ctx.restore();
+    } else if ((boxGloss || enhanced) && boxStyle !== 'neon') {
+      applyBoxGloss(ctx, x, y, w, h, radius, enhanced, boxStyle);
+    }
+  }
+
+  // 6. Box Border Styling
+  if (drawBorder && borderWidth > 0) {
+    ctx.save();
+    if (boxStyle === 'neon' || glowIntensity > 0.25) {
+      ctx.shadowColor = borderColor || '#22d3ee';
+      ctx.shadowBlur = Math.round((boxStyle === 'neon' ? 16 : 8) + glowIntensity * 20);
+    }
+
+    traceBoxPath(ctx, x, y, w, h, radius, boxStyle);
+    ctx.strokeStyle = resolveBoxStrokeStyle(ctx, x, y, w, h, borderColor, borderStyle);
+    ctx.lineWidth = borderWidth;
+    ctx.stroke();
+
+    if (borderStyle === 'double' && w > 28 && h > 28) {
+      ctx.shadowBlur = 0;
+      traceBoxPath(ctx, x + 7, y + 7, w - 14, h - 14, Math.max(0, radius - 6), boxStyle);
+      ctx.strokeStyle = hexToRgba(borderColor || '#FFFFFF', 0.65);
+      ctx.lineWidth = Math.max(1.5, borderWidth * 0.42);
+      ctx.stroke();
+    } else if (boxStyle === 'neon' && w > 18 && h > 18) {
+      ctx.shadowBlur = 0;
+      traceBoxPath(ctx, x + 2, y + 2, w - 4, h - 4, Math.max(0, radius - 2), boxStyle);
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.55)';
+      ctx.lineWidth = 1.4;
+      ctx.stroke();
+    } else if (boxStyle === 'millionaireHex' && w > 28 && h > 28) {
+      ctx.shadowBlur = 0;
+      traceBoxPath(ctx, x + 5, y + 5, w - 10, h - 10, Math.max(0, radius - 5), boxStyle);
+      ctx.strokeStyle = 'rgba(255, 244, 196, 0.32)';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
+    ctx.restore();
   }
 }
 
@@ -428,9 +710,102 @@ export function preloadTimerVideo(): Promise<HTMLVideoElement | null> {
 let bgCacheCanvas: HTMLCanvasElement | null = null;
 let bgCacheKey = '';
 
+function drawProceduralPresetDecor(
+  bctx: CanvasRenderingContext2D,
+  presetId: string,
+  W: number,
+  H: number
+): void {
+  if (presetId === 'millionaire' || presetId === 'tvShowGold') {
+    // Dramatic twin spotlights from top corners
+    const isMill = presetId === 'millionaire';
+    const beamColor = isMill ? 'rgba(110, 170, 255, 0.14)' : 'rgba(250, 204, 21, 0.13)';
+    for (const srcX of [W * 0.12, W * 0.88]) {
+      const grad = bctx.createLinearGradient(srcX, 0, W * 0.5, H * 0.72);
+      grad.addColorStop(0, beamColor);
+      grad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+      bctx.fillStyle = grad;
+      bctx.beginPath();
+      bctx.moveTo(srcX - 70, 0);
+      bctx.lineTo(srcX + 70, 0);
+      bctx.lineTo(W * 0.5 + W * 0.38, H * 0.85);
+      bctx.lineTo(W * 0.5 - W * 0.38, H * 0.85);
+      bctx.closePath();
+      bctx.fill();
+    }
+
+    // Concentric subtle stage studio rings behind the question stage
+    bctx.save();
+    bctx.strokeStyle = isMill ? 'rgba(229, 184, 75, 0.11)' : 'rgba(250, 204, 21, 0.09)';
+    bctx.lineWidth = 2;
+    const cx = W * 0.5;
+    const cy = H * 0.42;
+    for (const r of [W * 0.22, W * 0.34, W * 0.48]) {
+      bctx.beginPath();
+      bctx.arc(cx, cy, r, 0, Math.PI * 2);
+      bctx.stroke();
+    }
+    bctx.restore();
+  } else if (presetId === 'neonCyber') {
+    bctx.save();
+    bctx.strokeStyle = 'rgba(34, 211, 238, 0.07)';
+    bctx.lineWidth = 1.5;
+    const step = 90;
+    for (let x = 0; x <= W; x += step) {
+      bctx.beginPath();
+      bctx.moveTo(x, 0);
+      bctx.lineTo(x, H);
+      bctx.stroke();
+    }
+    for (let y = 0; y <= H; y += step) {
+      bctx.beginPath();
+      bctx.moveTo(0, y);
+      bctx.lineTo(W, y);
+      bctx.stroke();
+    }
+    const glow1 = bctx.createRadialGradient(W * 0.2, H * 0.2, 20, W * 0.2, H * 0.2, W * 0.45);
+    glow1.addColorStop(0, 'rgba(34, 211, 238, 0.18)');
+    glow1.addColorStop(1, 'rgba(34, 211, 238, 0)');
+    bctx.fillStyle = glow1;
+    bctx.fillRect(0, 0, W, H);
+
+    const glow2 = bctx.createRadialGradient(W * 0.82, H * 0.78, 20, W * 0.82, H * 0.78, W * 0.45);
+    glow2.addColorStop(0, 'rgba(236, 72, 153, 0.16)');
+    glow2.addColorStop(1, 'rgba(236, 72, 153, 0)');
+    bctx.fillStyle = glow2;
+    bctx.fillRect(0, 0, W, H);
+    bctx.restore();
+  } else if (presetId === 'parchmentGold') {
+    bctx.save();
+    bctx.strokeStyle = 'rgba(181, 132, 40, 0.35)';
+    bctx.lineWidth = 4;
+    bctx.strokeRect(28, 28, W - 56, H - 56);
+    bctx.strokeStyle = 'rgba(181, 132, 40, 0.22)';
+    bctx.lineWidth = 2;
+    bctx.strokeRect(42, 42, W - 84, H - 84);
+    bctx.restore();
+  } else if (presetId === 'playfulKids') {
+    bctx.save();
+    const bubbles = [
+      { x: 0.16, y: 0.18, r: 120, c: 'rgba(255,255,255,0.08)' },
+      { x: 0.85, y: 0.24, r: 90, c: 'rgba(250,204,21,0.1)' },
+      { x: 0.18, y: 0.82, r: 140, c: 'rgba(56,189,248,0.1)' },
+      { x: 0.82, y: 0.74, r: 105, c: 'rgba(255,255,255,0.08)' },
+    ];
+    for (const b of bubbles) {
+      bctx.beginPath();
+      bctx.arc(W * b.x, H * b.y, b.r, 0, Math.PI * 2);
+      bctx.fillStyle = b.c;
+      bctx.fill();
+    }
+    bctx.restore();
+  }
+}
+
 function drawCachedBackdrop(
   ctx: CanvasRenderingContext2D,
   template: TemplateSettings,
+  globalTime: number,
   W: number,
   H: number
 ): void {
@@ -477,6 +852,7 @@ function drawCachedBackdrop(
             bctx.fillStyle = grad;
             bctx.fillRect(0, 0, W, H);
           }
+          drawProceduralPresetDecor(bctx, template.presetId, W, H);
         }
 
         if (bgImg) {
@@ -508,12 +884,71 @@ function drawCachedBackdrop(
       }
     }
 
-    ctx.drawImage(bgCacheCanvas, 0, 0);
+    const motion = template.bgMotion || 'none';
+    if (motion === 'slowZoom' || motion === 'zoomAndParticles') {
+      const zoom = 1 + 0.06 * (0.5 + 0.5 * Math.sin(globalTime * 0.42 - Math.PI / 2));
+      const panX = Math.sin(globalTime * 0.25) * 14;
+      const panY = Math.cos(globalTime * 0.22) * 10;
+      ctx.save();
+      ctx.translate(W / 2 + panX, H / 2 + panY);
+      ctx.scale(zoom, zoom);
+      ctx.drawImage(bgCacheCanvas, -W / 2, -H / 2);
+      ctx.restore();
+    } else {
+      ctx.drawImage(bgCacheCanvas, 0, 0);
+    }
+
+    if (motion === 'particles' || motion === 'zoomAndParticles') {
+      drawAmbientParticles(ctx, template, globalTime, W, H);
+    }
     return;
   }
 
   ctx.fillStyle = template.solidBgColor || '#0c0c0c';
   ctx.fillRect(0, 0, W, H);
+}
+
+function drawAmbientParticles(
+  ctx: CanvasRenderingContext2D,
+  template: TemplateSettings,
+  globalTime: number,
+  W: number,
+  H: number
+): void {
+  const isNeon = template.presetId === 'neonCyber' || template.borderStyle === 'gradientNeon';
+  const isGold =
+    template.presetId === 'millionaire' ||
+    template.presetId === 'tvShowGold' ||
+    template.presetId === 'channelSand' ||
+    template.presetId === 'parchmentGold' ||
+    template.borderStyle === 'gradientGold';
+
+  ctx.save();
+  const count = 24;
+  for (let i = 0; i < count; i++) {
+    const seedX = ((i * 197 + 43) % 100) / 100;
+    const seedY = ((i * 313 + 71) % 100) / 100;
+    const speedY = 0.025 + (i % 5) * 0.008;
+    const sway = Math.sin(globalTime * (0.6 + (i % 4) * 0.2) + i) * 26;
+    const x = seedX * W + sway;
+    const y = (((seedY - globalTime * speedY) % 1) + 1) % 1 * H;
+    const radius = 3 + (i % 4) * 2.5;
+    const alpha = 0.16 + 0.22 * (0.5 + 0.5 * Math.sin(globalTime * 1.8 + i * 1.3));
+
+    const color = isNeon
+      ? i % 2 === 0
+        ? `rgba(34, 211, 238, ${alpha.toFixed(3)})`
+        : `rgba(236, 72, 153, ${alpha.toFixed(3)})`
+      : isGold
+        ? `rgba(237, 214, 162, ${alpha.toFixed(3)})`
+        : `rgba(255, 255, 255, ${alpha.toFixed(3)})`;
+
+    ctx.beginPath();
+    ctx.arc(x, y, radius, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.fill();
+  }
+  ctx.restore();
 }
 
 function drawBrandWatermark(
@@ -635,6 +1070,218 @@ function drawBrandWatermark(
   ctx.restore();
 }
 
+function drawRevealConfetti(
+  ctx: CanvasRenderingContext2D,
+  originX: number,
+  originY: number,
+  revealElapsed: number
+): void {
+  if (revealElapsed < 0 || revealElapsed > 2.4) return;
+  const palette = ['#00B050', '#EDD6A2', '#38BDF8', '#F43F5E', '#FACC15', '#FFFFFF'];
+  const fade = revealElapsed > 1.5 ? clamp01(1 - (revealElapsed - 1.5) / 0.9) : 1;
+
+  ctx.save();
+  ctx.globalAlpha = fade;
+  const count = 34;
+  for (let i = 0; i < count; i++) {
+    const angle = (i / count) * Math.PI * 2 + (i % 3) * 0.17;
+    const speed = 260 + (i % 7) * 95;
+    const dist = speed * revealElapsed * (1 - 0.18 * Math.min(1, revealElapsed));
+    const px = originX + Math.cos(angle) * dist;
+    const py = originY + Math.sin(angle) * dist * 0.72 + 240 * revealElapsed * revealElapsed;
+    const rot = i * 0.7 + revealElapsed * (4 + (i % 4));
+    const w = 12 + (i % 4) * 4;
+    const h = 7 + (i % 3) * 2;
+
+    ctx.save();
+    ctx.translate(px, py);
+    ctx.rotate(rot);
+    ctx.fillStyle = palette[i % palette.length];
+    ctx.fillRect(-w / 2, -h / 2, w, h);
+    ctx.restore();
+  }
+  ctx.restore();
+}
+
+function drawPrizeLadder(
+  ctx: CanvasRenderingContext2D,
+  template: TemplateSettings,
+  slideCount: number,
+  activeSlideIndex: number,
+  isRevealed: boolean,
+  revealElapsed: number,
+  W: number,
+  H: number,
+  fontStack: string
+): void {
+  if (!template.showPrizeLadder || slideCount <= 0) return;
+
+  const tiers = getSlidePrizeTiers(slideCount, template.prizeLadderAmounts);
+  const currentAmount = tiers[Math.min(activeSlideIndex, tiers.length - 1)] || '';
+  const isWide = template.aspectRatio === '16:9';
+  const style = template.prizeLadderStyle || 'topStrip';
+  const title = (template.prizeLadderTitle || 'الجائزة').trim();
+
+  if (style === 'sideColumn' && isWide) {
+    // Full vertical Millionaire money ladder on the left of 16:9 widescreen
+    const panelW = 248;
+    const panelX = 34;
+    const panelTop = 76;
+    const panelBottom = H - 76;
+    const maxVisible = Math.min(15, tiers.length);
+
+    let startIdx = 0;
+    if (tiers.length > maxVisible) {
+      startIdx = Math.max(0, Math.min(tiers.length - maxVisible, activeSlideIndex - Math.floor(maxVisible / 2)));
+    }
+    const visibleTiers = tiers.slice(startIdx, startIdx + maxVisible);
+    const panelH = panelBottom - panelTop;
+    const rowH = Math.min(54, (panelH - 54) / Math.max(1, visibleTiers.length));
+    const actualH = 54 + visibleTiers.length * rowH + 14;
+    const startY = panelTop + (panelH - actualH) / 2;
+
+    ctx.save();
+    drawRoundedRect(ctx, panelX, startY, panelW, actualH, 22);
+    ctx.fillStyle = 'rgba(6, 14, 42, 0.88)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(229, 184, 75, 0.55)';
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+
+    ctx.font = `800 22px ${fontStack}`;
+    ctx.direction = 'rtl';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#EDD6A2';
+    ctx.fillText(title || 'سلم الجوائز', panelX + panelW / 2, startY + 28);
+
+    // Draw top-to-bottom descending (highest prize at top, lowest at bottom)
+    for (let v = 0; v < visibleTiers.length; v++) {
+      const tierIdx = startIdx + (visibleTiers.length - 1 - v);
+      const amount = tiers[tierIdx];
+      const ry = startY + 52 + v * rowH;
+      const isCurrent = tierIdx === activeSlideIndex;
+      const isWon = tierIdx < activeSlideIndex || (isCurrent && isRevealed);
+      const isMilestone = tierIdx === tiers.length - 1 || tierIdx === 4 || tierIdx === 9;
+
+      if (isCurrent) {
+        traceBoxPath(ctx, panelX + 10, ry + 2, panelW - 20, rowH - 6, 12, 'millionaireHex');
+        ctx.fillStyle = isRevealed
+          ? '#00B050'
+          : 'rgba(245, 158, 11, 0.92)';
+        ctx.fill();
+        ctx.strokeStyle = '#FFF3B0';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+
+      ctx.font = `${isCurrent ? 900 : 700} ${isCurrent ? 22 : 19}px ${fontStack}`;
+      ctx.textAlign = 'right';
+      ctx.fillStyle = isCurrent ? '#FFFFFF' : isWon ? '#6ee7b7' : isMilestone ? '#FFF3B0' : '#d4a73a';
+      ctx.fillText(`${tierIdx + 1}`, panelX + panelW - 22, ry + rowH / 2 - 1);
+
+      ctx.textAlign = 'left';
+      ctx.direction = 'ltr';
+      ctx.fillText(amount, panelX + 22, ry + rowH / 2 - 1);
+      ctx.direction = 'rtl';
+    }
+    ctx.restore();
+    return;
+  }
+
+  // Compact Top Strip (9:16 & 16:9 friendly, or compact top card for sideColumn on 9:16)
+  ctx.save();
+  const topOffset = template.showProgressCounter && slideCount > 1 ? (isWide ? 96 : 134) : isWide ? 40 : 88;
+  const stripW = isWide ? 780 : 820;
+  const stripH = style === 'sideColumn' ? 92 : 74;
+  const stripX = (W - stripW) / 2;
+  const stripY = topOffset;
+
+  traceBoxPath(ctx, stripX, stripY, stripW, stripH, 24, template.boxStyle || 'millionaireHex');
+  ctx.fillStyle = 'rgba(7, 17, 52, 0.88)';
+  ctx.fill();
+  ctx.strokeStyle = resolveBoxStrokeStyle(
+    ctx,
+    stripX,
+    stripY,
+    stripW,
+    stripH,
+    '#d4a73a',
+    'gradientGold'
+  );
+  ctx.lineWidth = 3;
+  ctx.stroke();
+
+  // Current tier badge on right
+  const badgeW = 240;
+  const badgeX = stripX + stripW - badgeW - 18;
+  const badgeY = stripY + 10;
+  const badgeH = stripH - 20;
+  const pulse = isRevealed && revealElapsed < 0.6 ? 1 + 0.06 * Math.sin((revealElapsed / 0.6) * Math.PI) : 1;
+
+  ctx.save();
+  ctx.translate(badgeX + badgeW / 2, badgeY + badgeH / 2);
+  ctx.scale(pulse, pulse);
+  traceBoxPath(ctx, -badgeW / 2, -badgeH / 2, badgeW, badgeH, 16, 'millionaireHex');
+  ctx.fillStyle = isRevealed ? '#00B050' : '#d97706';
+  ctx.fill();
+  ctx.strokeStyle = '#FFF3B0';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  ctx.font = `900 ${isWide ? 28 : 30}px ${fontStack}`;
+  ctx.direction = 'ltr';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#FFFFFF';
+  ctx.fillText(currentAmount, 0, 1);
+  ctx.restore();
+
+  // Mini step ladder on left side of the strip
+  const maxSteps = Math.min(6, tiers.length);
+  let start = Math.max(0, activeSlideIndex - 2);
+  if (start + maxSteps > tiers.length) {
+    start = Math.max(0, tiers.length - maxSteps);
+  }
+  const visibleCount = Math.min(maxSteps, tiers.length - start);
+  const stepsAreaW = stripW - badgeW - 56;
+  const cellW = Math.min(92, (stepsAreaW - (visibleCount - 1) * 8) / Math.max(1, visibleCount));
+  const totalRowW = visibleCount * cellW + Math.max(0, visibleCount - 1) * 8;
+  const rowStartX = stripX + 24 + (stepsAreaW - totalRowW) / 2;
+
+  for (let k = 0; k < visibleCount; k++) {
+    // RTL progression: step 0 at right, higher steps toward left
+    const idx = start + k;
+    const visualCol = visibleCount - 1 - k;
+    const cx = rowStartX + visualCol * (cellW + 8);
+    const cy = stripY + (stripH - 42) / 2;
+    const isCur = idx === activeSlideIndex;
+    const isDone = idx < activeSlideIndex || (isCur && isRevealed);
+
+    drawRoundedRect(ctx, cx, cy, cellW, 42, 10);
+    ctx.fillStyle = isCur
+      ? isRevealed
+        ? 'rgba(0, 176, 80, 0.35)'
+        : 'rgba(245, 158, 11, 0.32)'
+      : isDone
+        ? 'rgba(0, 176, 80, 0.18)'
+        : 'rgba(255, 255, 255, 0.06)';
+    ctx.fill();
+    ctx.strokeStyle = isCur ? '#FACC15' : isDone ? '#34D399' : 'rgba(237, 214, 162, 0.25)';
+    ctx.lineWidth = isCur ? 2 : 1;
+    ctx.stroke();
+
+    ctx.font = `${isCur ? 800 : 700} ${tiers[idx].length > 7 ? 15 : 17}px ${fontStack}`;
+    ctx.direction = 'ltr';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = isCur ? '#FFF3B0' : isDone ? '#6EE7B7' : 'rgba(255,255,255,0.65)';
+    ctx.fillText(tiers[idx], cx + cellW / 2, cy + 22);
+  }
+
+  ctx.restore();
+}
+
 export function renderQuizFrame(
   ctx: CanvasRenderingContext2D,
   globalTime: number,
@@ -648,14 +1295,76 @@ export function renderQuizFrame(
   const isWide = template.aspectRatio === '16:9';
   const fontStack = `'${template.fontFamily}', 'Cairo', 'Tajawal', sans-serif`;
 
+  const boxStyle: BoxShapeStyle = template.boxStyle || 'flat';
+  const borderStyle: BoxBorderStyle = template.borderStyle || 'solid';
+  const shadowIntensity = template.shadowIntensity ?? 1;
+  const glowIntensity = template.glowIntensity ?? 0;
+  const globalScale = Math.max(0.75, Math.min(1.25, template.globalScale ?? 1));
+  const timerScale = Math.max(0.7, Math.min(1.4, template.timerScale ?? 1));
+  const badgeScale = Math.max(0.7, Math.min(1.4, template.badgeScale ?? 1));
+
   ctx.save();
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
 
-  // 1. Cached Background Layer
-  drawCachedBackdrop(ctx, template, W, H);
+  // 1. Cached Background Layer + Optional Motion & Particles
+  drawCachedBackdrop(ctx, template, globalTime, W, H);
 
-  const contentEnd = getSlidesContentDuration(slides, timing, audio);
+  const introDur = getIntroHookDuration(template);
+  if (introDur > 0 && slides.length > 0 && globalTime < introDur) {
+    const enterProg = clamp01(globalTime / 0.3);
+    const exitProg = globalTime > introDur - 0.22 ? clamp01((introDur - globalTime) / 0.22) : 1;
+    const alpha = easeOutCubic(enterProg) * exitProg;
+    const popScale = (0.84 + 0.16 * easeOutBack(enterProg)) * globalScale;
+    const hookText = (template.introHookText || 'اختبر معلوماتك الآن!').trim();
+
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.translate(W / 2, H / 2);
+    ctx.scale(popScale, popScale);
+
+    const cardW = isWide ? Math.min(W - 260, 1180) : Math.min(W - 120, 860);
+    ctx.font = `900 ${isWide ? 72 : 66}px ${fontStack}`;
+    ctx.direction = 'rtl';
+    const lines = wrapArabicText(ctx, hookText, cardW - 100);
+    const lineH = isWide ? 94 : 88;
+    const cardH = Math.max(220, lines.length * lineH + 96);
+
+    drawStyledBoxContainer(ctx, {
+      x: -cardW / 2,
+      y: -cardH / 2,
+      w: cardW,
+      h: cardH,
+      radius: template.questionBorderRadius,
+      fillColorHex: template.questionBoxColor,
+      fillRgba: hexToRgba(template.questionBoxColor, Math.max(0.85, template.questionBoxOpacity)),
+      opacity: Math.max(0.85, template.questionBoxOpacity),
+      borderColor: template.questionBorderColor,
+      borderWidth: Math.max(4, template.questionBorderWidth),
+      boxStyle,
+      borderStyle,
+      boxGloss: template.boxGloss,
+      enhanced: template.enhanceAppearance ?? true,
+      shadowIntensity,
+      glowIntensity: Math.max(0.35, glowIntensity),
+      wingExtensions: boxStyle === 'millionaireHex',
+    });
+
+    ctx.fillStyle = template.questionTextColor;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const startY = -((lines.length - 1) * lineH) / 2;
+    lines.forEach((line, idx) => {
+      ctx.fillText(line, 0, startY + idx * lineH);
+    });
+    ctx.restore();
+
+    drawBrandWatermark(ctx, template, globalTime, W, H, fontStack);
+    ctx.restore();
+    return;
+  }
+
+  const contentEnd = getSlidesContentDuration(slides, timing, audio, template);
 
   // Check if currently in End Card window
   if (template.showEndCard && slides.length > 0 && globalTime >= contentEnd) {
@@ -675,7 +1384,8 @@ export function renderQuizFrame(
 
     const lines = wrapArabicText(ctx, endText, W - 200);
     const lineH = 112;
-    const startY = H / 2 - ((lines.length - 1) * lineH) / 2;
+    const hasCta = Boolean(template.showEndSubscribeCta);
+    const startY = (hasCta ? H * 0.44 : H / 2) - ((lines.length - 1) * lineH) / 2;
 
     ctx.fillStyle = 'rgba(0, 0, 0, 0.38)';
     lines.forEach((line, idx) => {
@@ -685,6 +1395,31 @@ export function renderQuizFrame(
     lines.forEach((line, idx) => {
       ctx.fillText(line, W / 2, startY + idx * lineH);
     });
+
+    if (hasCta) {
+      const ctaY = startY + (lines.length - 1) * lineH + 145;
+      const ctaScale = 1 + 0.035 * Math.sin(endElapsed * 5);
+      const ctaW = isWide ? 660 : 700;
+      const ctaH = 78;
+      ctx.save();
+      ctx.translate(W / 2, ctaY);
+      ctx.scale(ctaScale, ctaScale);
+      drawRoundedRect(ctx, -ctaW / 2, -ctaH / 2, ctaW, ctaH, 24);
+      ctx.fillStyle = '#DC2626';
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.85)';
+      ctx.lineWidth = 3;
+      ctx.stroke();
+
+      ctx.font = `800 ${isWide ? 32 : 34}px ${fontStack}`;
+      ctx.direction = 'rtl';
+      ctx.fillStyle = '#FFFFFF';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('اشترك في القناة · اكتب نتيجتك في التعليقات', 0, 2);
+      ctx.restore();
+    }
+
     ctx.restore();
 
     drawBrandWatermark(ctx, template, globalTime, W, H, fontStack);
@@ -693,7 +1428,7 @@ export function renderQuizFrame(
   }
 
   // 2. Active Slide & Audio-Synced Schedule
-  const info = getSlideTimeInfo(globalTime, slides, timing, audio);
+  const info = getSlideTimeInfo(globalTime, slides, timing, audio, template);
   if (!info) {
     ctx.restore();
     return;
@@ -714,6 +1449,8 @@ export function renderQuizFrame(
   const enhanced = template.enhanceAppearance ?? true;
   const slideImg = getCachedImage(slide.imageDataUrl);
   const darkBg = isBackgroundDark(template);
+  const isRevealed = localTime >= tRevealStart;
+  const revealElapsed = Math.max(0, localTime - tRevealStart);
 
   // 2.5 Optional Slide Progress Counter & Bar
   if (template.showProgressCounter && slides.length > 1) {
@@ -750,6 +1487,35 @@ export function renderQuizFrame(
     ctx.restore();
   }
 
+  // 2.6 Optional Millionaire Prize Ladder
+  if (template.showPrizeLadder) {
+    drawPrizeLadder(
+      ctx,
+      template,
+      slides.length,
+      slideIndex,
+      isRevealed,
+      revealElapsed,
+      W,
+      H,
+      fontStack
+    );
+  }
+
+  // Apply Global Scale around stage focal center
+  const hasGlobalScale = Math.abs(globalScale - 1) > 0.005;
+  const shiftForWideLadder =
+    isWide && template.showPrizeLadder && (template.prizeLadderStyle || 'topStrip') === 'sideColumn'
+      ? 126
+      : 0;
+
+  ctx.save();
+  if (hasGlobalScale) {
+    ctx.translate(W / 2, H * 0.52);
+    ctx.scale(globalScale, globalScale);
+    ctx.translate(-W / 2, -H * 0.52);
+  }
+
   // 3. Optional Top Badge
   const safeBadge = (slide.badgeText ?? '').trim();
   if (template.showBadge && safeBadge) {
@@ -767,17 +1533,20 @@ export function renderQuizFrame(
       const padX = 46;
       const boxW = Math.min(W - 160, textW + padX * 2);
       const boxH = 66;
-      const boxX = (W - boxW) / 2 + tr.offsetX;
-      const boxY = badgeCenterY - boxH / 2 + tr.offsetY;
+      const badgeCenterX = W / 2 + shiftForWideLadder + tr.offsetX;
+      const badgePosY = badgeCenterY + tr.offsetY;
 
-      drawRoundedRect(ctx, boxX, boxY, boxW, boxH, 33);
+      ctx.translate(badgeCenterX, badgePosY);
+      ctx.scale(badgeScale, badgeScale);
+
+      drawRoundedRect(ctx, -boxW / 2, -boxH / 2, boxW, boxH, 33);
       ctx.fillStyle = template.badgeBgColor;
       ctx.fill();
 
       ctx.fillStyle = template.badgeTextColor;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillText(safeBadge, W / 2 + tr.offsetX, badgeCenterY + 2 + tr.offsetY);
+      ctx.fillText(safeBadge, 0, 2);
       ctx.restore();
     }
   }
@@ -836,7 +1605,9 @@ export function renderQuizFrame(
     const qH = Math.max(minChannelQH, textBlockH + padY * 2);
 
     const centerX =
-      (isWide && slideImg ? W * 0.61 : isChannelLayout && !isWide ? W * 0.502 : W / 2) + tr.offsetX;
+      (isWide && slideImg ? W * 0.61 : isChannelLayout && !isWide ? W * 0.502 : W / 2) +
+      shiftForWideLadder +
+      tr.offsetX;
     const centerY = qCenterY + tr.offsetY;
 
     // Optional Question Illustration Image
@@ -858,7 +1629,7 @@ export function renderQuizFrame(
           frameH = maxBoxH;
           frameW = frameH * imgAspect;
         }
-        frameX = W * 0.165 + tr.offsetX;
+        frameX = W * 0.165 + shiftForWideLadder + tr.offsetX;
         frameY = qCenterY + tr.offsetY;
       } else {
         const maxTopY = template.showBadge && safeBadge ? 255 : 145;
@@ -898,38 +1669,30 @@ export function renderQuizFrame(
     ctx.translate(centerX, centerY);
     ctx.scale(tr.scale, tr.scale);
 
-    if (template.questionBoxOpacity > 0.01) {
-      if (enhanced) {
-        drawRoundedRect(
-          ctx,
-          -qW / 2 - 5,
-          -qH / 2 - 5,
-          qW + 10,
-          qH + 10,
-          template.questionBorderRadius + 4
-        );
-        ctx.fillStyle = hexToRgba(template.questionBorderColor || '#FFFFFF', 0.14);
-        ctx.fill();
-      }
-
-      drawRoundedRect(ctx, -qW / 2, -qH / 2 + 10, qW, qH, template.questionBorderRadius);
-      ctx.fillStyle = enhanced ? 'rgba(0, 0, 0, 0.34)' : 'rgba(0, 0, 0, 0.22)';
-      ctx.fill();
-
-      drawRoundedRect(ctx, -qW / 2, -qH / 2, qW, qH, template.questionBorderRadius);
-      ctx.fillStyle = hexToRgba(template.questionBoxColor, template.questionBoxOpacity);
-      ctx.fill();
-
-      if (template.boxGloss || enhanced) {
-        applyBoxGloss(ctx, -qW / 2, -qH / 2, qW, qH, template.questionBorderRadius, enhanced);
-      }
-    }
-
-    if (template.questionBorderWidth > 0 && template.questionBoxOpacity > 0.01) {
-      drawRoundedRect(ctx, -qW / 2, -qH / 2, qW, qH, template.questionBorderRadius);
-      ctx.strokeStyle = template.questionBorderColor;
-      ctx.lineWidth = template.questionBorderWidth;
-      ctx.stroke();
+    const hasQBody = template.questionBoxOpacity > 0.01;
+    if (hasQBody) {
+      drawStyledBoxContainer(ctx, {
+        x: -qW / 2,
+        y: -qH / 2,
+        w: qW,
+        h: qH,
+        radius: template.questionBorderRadius,
+        fillColorHex: template.questionBoxColor,
+        fillRgba: hexToRgba(template.questionBoxColor, template.questionBoxOpacity),
+        opacity: template.questionBoxOpacity,
+        borderColor: template.questionBorderColor,
+        borderWidth: template.questionBorderWidth,
+        boxStyle,
+        borderStyle,
+        boxGloss: template.boxGloss,
+        enhanced,
+        shadowIntensity,
+        glowIntensity,
+        shadowOffsetY: 10,
+        drawFill: true,
+        drawBorder: template.questionBorderWidth > 0,
+        wingExtensions: boxStyle === 'millionaireHex' && !isWide,
+      });
     }
 
     if (qHasMath) {
@@ -983,13 +1746,14 @@ export function renderQuizFrame(
   // 5. Four Options
   const isSuspending =
     localTime >= tSuspenseStart && localTime < tRevealStart && timing.suspenseDuration > 0;
-  const isRevealed = localTime >= tRevealStart;
-  const revealElapsed = Math.max(0, localTime - tRevealStart);
   const revealAnim = isRevealed ? easeOutBack(clamp01(revealElapsed / 0.35)) : 0;
   const revealFade = isRevealed ? clamp01(revealElapsed / 0.25) : 0;
 
   const totalOptionsW = isWide
-    ? Math.min(W - 140, Math.max(1340, (template.optionsWidth / 100) * W))
+    ? Math.min(
+        W - (shiftForWideLadder > 0 ? 360 : 140),
+        Math.max(shiftForWideLadder > 0 ? 1160 : 1340, (template.optionsWidth / 100) * W)
+      )
     : (template.optionsWidth / 100) * W;
 
   const optionsStartPx = isWide
@@ -1016,6 +1780,8 @@ export function renderQuizFrame(
 
   const wrongColor = template.wrongColor || '#DC2626';
   const isRedWrongMode = template.revealStyle === 'redWrongGreenCorrect';
+  let correctOriginX = W / 2;
+  let correctOriginY = optionsStartPx + effectiveOptH;
 
   for (let i = 0; i < 4; i++) {
     const optProgress = clamp01((localTime - tOptionStarts[i]) / animDuration);
@@ -1025,18 +1791,27 @@ export function renderQuizFrame(
     const isCorrect = i === slide.correctIndex;
     const isWrongRed = isRevealed && !isCorrect && isRedWrongMode;
 
+    const optWindowEnd = i < 3 ? tOptionStarts[i + 1] : tThinkingStart;
+    const isSpokenHighlight =
+      Boolean(template.highlightSpokenOption) &&
+      !isRevealed &&
+      localTime >= tOptionStarts[i] &&
+      localTime < optWindowEnd;
+
     let boxW = totalOptionsW;
     const boxH = effectiveOptH;
-    let centerX = W / 2;
+    let centerX = W / 2 + shiftForWideLadder;
     let centerY = optionsStartPx + i * (boxH + effectiveRowGap) + boxH / 2;
 
     if (template.optionsLayout === 'channel2x2') {
       if (isWide) {
         // Widescreen 16:9 2x2 around central timer gap
-        boxW = 0.405 * W;
+        boxW = shiftForWideLadder > 0 ? 0.365 * W : 0.405 * W;
         const row = Math.floor(i / 2);
         const isRightCol = i % 2 === 0; // 0,2 on right in RTL; 1,3 on left
-        centerX = isRightCol ? W * 0.755 : W * 0.245;
+        centerX =
+          (isRightCol ? W * 0.755 : W * 0.245) +
+          (shiftForWideLadder > 0 ? (isRightCol ? 74 : 152) : 0);
         centerY = optionsStartPx + row * (boxH + effectiveRowGap) + boxH / 2;
       } else {
         // Vertical 9:16 channel s0..s3 coordinates
@@ -1052,13 +1827,22 @@ export function renderQuizFrame(
       boxW = (totalOptionsW - colGap) / 2;
       const row = Math.floor(i / 2);
       const col = i % 2;
-      const rightStart = (W + totalOptionsW) / 2;
+      const rightStart = (W + totalOptionsW) / 2 + shiftForWideLadder;
       centerX = rightStart - col * (boxW + colGap) - boxW / 2;
       centerY = optionsStartPx + row * (boxH + effectiveRowGap) + boxH / 2;
     }
 
+    if (isCorrect) {
+      correctOriginX = centerX + tr.offsetX;
+      correctOriginY = centerY + tr.offsetY;
+    }
+
     let finalScale = tr.scale;
     let finalAlpha = tr.opacity;
+
+    if (isSpokenHighlight) {
+      finalScale *= 1.032;
+    }
 
     if (isSuspending) {
       const pulsePhase = Math.sin(((localTime - tSuspenseStart) / 0.5) * Math.PI);
@@ -1080,75 +1864,95 @@ export function renderQuizFrame(
     ctx.translate(centerX + tr.offsetX, centerY + tr.offsetY);
     ctx.scale(finalScale, finalScale);
 
-    const boxFill =
+    const effectiveFillHex =
       isRevealed && isCorrect
-        ? hexToRgba(template.correctColor, 1)
+        ? template.correctColor
         : isWrongRed
-          ? hexToRgba(wrongColor, 0.94)
-          : hexToRgba(template.optionBoxColor, template.optionBoxOpacity);
+          ? wrongColor
+          : template.optionBoxColor;
+
+    const effectiveFillOpacity =
+      isRevealed && isCorrect
+        ? 1
+        : isWrongRed
+          ? 0.94
+          : template.optionBoxOpacity;
+
+    const boxFill = hexToRgba(effectiveFillHex, effectiveFillOpacity);
 
     const borderCol =
       isRevealed && isCorrect
         ? '#FFFFFF'
         : isWrongRed
           ? '#FECACA'
-          : template.optionBorderColor;
+          : isSpokenHighlight
+            ? '#FFF3B0'
+            : template.optionBorderColor;
 
-    if (template.optionBoxOpacity > 0.01 || (isRevealed && (isCorrect || isWrongRed))) {
+    const shouldDrawBody =
+      template.optionBoxOpacity > 0.01 || (isRevealed && (isCorrect || isWrongRed));
+
+    if (shouldDrawBody) {
       if (isRevealed && isCorrect) {
-        drawRoundedRect(
+        traceBoxPath(
           ctx,
           -boxW / 2 - 6,
           -boxH / 2 - 6,
           boxW + 12,
           boxH + 12,
-          template.optionBorderRadius + 4
+          template.optionBorderRadius + 4,
+          boxStyle
         );
         ctx.fillStyle = hexToRgba(template.correctColor, 0.34);
         ctx.fill();
       } else if (isWrongRed) {
-        drawRoundedRect(
+        traceBoxPath(
           ctx,
           -boxW / 2 - 3,
           -boxH / 2 - 3,
           boxW + 6,
           boxH + 6,
-          template.optionBorderRadius + 2
+          template.optionBorderRadius + 2,
+          boxStyle
         );
         ctx.fillStyle = hexToRgba(wrongColor, 0.22);
         ctx.fill();
-      } else {
-        drawRoundedRect(ctx, -boxW / 2, -boxH / 2 + 8, boxW, boxH, template.optionBorderRadius);
-        ctx.fillStyle = enhanced ? 'rgba(0, 0, 0, 0.32)' : 'rgba(0, 0, 0, 0.2)';
-        ctx.fill();
       }
 
-      drawRoundedRect(ctx, -boxW / 2, -boxH / 2, boxW, boxH, template.optionBorderRadius);
-      ctx.fillStyle = boxFill;
-      ctx.fill();
-
-      if ((template.boxGloss || enhanced) && !(isRevealed && (isCorrect || isWrongRed))) {
-        applyBoxGloss(ctx, -boxW / 2, -boxH / 2, boxW, boxH, template.optionBorderRadius, enhanced);
-      }
-    }
-
-    if (
-      template.optionBorderWidth > 0 &&
-      (template.optionBoxOpacity > 0.01 || (isRevealed && (isCorrect || isWrongRed)))
-    ) {
-      drawRoundedRect(ctx, -boxW / 2, -boxH / 2, boxW, boxH, template.optionBorderRadius);
-      ctx.strokeStyle = borderCol;
-      ctx.lineWidth =
-        isRevealed && (isCorrect || isWrongRed)
-          ? Math.max(4, template.optionBorderWidth)
-          : template.optionBorderWidth;
-      ctx.stroke();
+      drawStyledBoxContainer(ctx, {
+        x: -boxW / 2,
+        y: -boxH / 2,
+        w: boxW,
+        h: boxH,
+        radius: template.optionBorderRadius,
+        fillColorHex: effectiveFillHex,
+        fillRgba: boxFill,
+        opacity: effectiveFillOpacity,
+        borderColor: borderCol,
+        borderWidth:
+          isRevealed && (isCorrect || isWrongRed)
+            ? Math.max(4, template.optionBorderWidth)
+            : isSpokenHighlight
+              ? Math.max(5, template.optionBorderWidth + 1)
+              : template.optionBorderWidth,
+        boxStyle,
+        borderStyle: isRevealed && (isCorrect || isWrongRed) ? 'solid' : borderStyle,
+        boxGloss: template.boxGloss && !(isRevealed && (isCorrect || isWrongRed)),
+        enhanced: enhanced && !(isRevealed && (isCorrect || isWrongRed)),
+        shadowIntensity: isRevealed && (isCorrect || isWrongRed) ? 0.5 : shadowIntensity,
+        glowIntensity: isSpokenHighlight ? Math.max(0.55, glowIntensity) : glowIntensity,
+        isHighlighted: isSpokenHighlight,
+        shadowOffsetY: 8,
+        drawFill: true,
+        drawBorder: template.optionBorderWidth > 0 || isSpokenHighlight,
+      });
     }
 
     const labelStr = getOptionBadgeLabel(i, template.optionLabelStyle);
     const hasBadge = labelStr.length > 0;
     const badgeSize = Math.min(boxH - 26, 66);
-    const badgeMarginRight = 24;
+    const isHexStyle = boxStyle === 'millionaireHex';
+    const badgeMarginRight = isHexStyle ? 38 : 24;
 
     if (hasBadge) {
       const badgeCenterX = boxW / 2 - badgeMarginRight - badgeSize / 2;
@@ -1188,11 +1992,11 @@ export function renderQuizFrame(
 
     const showCross = isWrongRed && !isChannelLayout;
 
-    const iconReserve = showCheck || showCross ? 76 : 22;
-    const rightReserve = hasBadge ? badgeMarginRight + badgeSize + 24 : 22;
+    const iconReserve = showCheck || showCross ? (isHexStyle ? 86 : 76) : isHexStyle ? 36 : 22;
+    const rightReserve = hasBadge ? badgeMarginRight + badgeSize + 24 : isHexStyle ? 36 : 22;
 
     if (showCheck) {
-      const checkX = -boxW / 2 + 44;
+      const checkX = -boxW / 2 + (isHexStyle ? 54 : 44);
       ctx.beginPath();
       ctx.arc(checkX, 0, 22, 0, Math.PI * 2);
       ctx.fillStyle = '#FFFFFF';
@@ -1208,7 +2012,7 @@ export function renderQuizFrame(
       ctx.lineJoin = 'round';
       ctx.stroke();
     } else if (showCross) {
-      const crossX = -boxW / 2 + 44;
+      const crossX = -boxW / 2 + (isHexStyle ? 54 : 44);
       ctx.beginPath();
       ctx.arc(crossX, 0, 20, 0, Math.PI * 2);
       ctx.fillStyle = 'rgba(255, 255, 255, 0.92)';
@@ -1312,12 +2116,12 @@ export function renderQuizFrame(
     const remaining = Math.max(0, timing.thinkingDuration - elapsedThink);
     const ratio = clamp01(remaining / Math.max(0.01, timing.thinkingDuration));
 
-    let timerCenterX = W / 2;
+    let timerCenterX = W / 2 + shiftForWideLadder;
     let timerCenterY = (template.timerY / 100) * H;
 
     if (template.timerStyle === 'channelBox') {
       if (isWide) {
-        timerCenterX = W * 0.5;
+        timerCenterX = W * 0.5 + shiftForWideLadder;
         timerCenterY = optionsStartPx + effectiveOptH + effectiveRowGap * 0.5;
       } else {
         timerCenterX = 0.5025 * W;
@@ -1332,7 +2136,7 @@ export function renderQuizFrame(
     ctx.save();
     ctx.globalAlpha = easeOutCubic(enterProg);
     ctx.translate(timerCenterX, timerCenterY);
-    const s = 0.85 + 0.15 * easeOutCubic(enterProg);
+    const s = (0.85 + 0.15 * easeOutCubic(enterProg)) * timerScale;
     ctx.scale(s, s);
 
     const matchBg = template.timerMatchBackground !== false;
@@ -1458,7 +2262,7 @@ export function renderQuizFrame(
     const lines = expHasMath ? [expText] : wrapArabicText(ctx, expText, maxW).slice(0, 2);
     const lineH = 42;
     const boxH = lines.length * lineH + 34;
-    const boxX = (W - boxW) / 2;
+    const boxX = (W - boxW) / 2 + shiftForWideLadder;
     const boxY = expY - boxH / 2;
 
     drawRoundedRect(ctx, boxX, boxY, boxW, boxH, 24);
@@ -1469,18 +2273,26 @@ export function renderQuizFrame(
     ctx.stroke();
 
     if (expHasMath) {
-      drawSmartQuizText(ctx, expText, W / 2, expY, maxW, 30, fontStack, 700, '#FFFFFF', 2);
+      drawSmartQuizText(ctx, expText, W / 2 + shiftForWideLadder, expY, maxW, 30, fontStack, 700, '#FFFFFF', 2);
     } else {
       ctx.fillStyle = '#FFFFFF';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       const startLineY = expY - ((lines.length - 1) * lineH) / 2;
       lines.forEach((line, idx) => {
-        ctx.fillText(line, W / 2, startLineY + idx * lineH);
+        ctx.fillText(line, W / 2 + shiftForWideLadder, startLineY + idx * lineH);
       });
     }
     ctx.restore();
   }
+
+  // 7.2 Optional Celebration Confetti Burst on Answer Reveal
+  if (isRevealed && template.revealConfetti) {
+    drawRevealConfetti(ctx, correctOriginX, correctOriginY, revealElapsed);
+  }
+
+  // Close Global Scale Transform Scope
+  ctx.restore();
 
   // 7.5 Channel Brand Logo / Animated Watermark & Handle
   drawBrandWatermark(ctx, template, globalTime, W, H, fontStack);

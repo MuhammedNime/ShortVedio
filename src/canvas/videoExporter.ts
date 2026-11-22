@@ -262,7 +262,14 @@ export async function exportQuizVideo(
         const audioElapsed = exportAudioCtx.currentTime - audioStartTime;
         const elapsed = Math.min(totalDuration, Math.max(0, audioElapsed));
 
-        const events = collectSoundEventsInInterval(prevElapsed, elapsed, slides, timing, audio);
+        const events = collectSoundEventsInInterval(
+          prevElapsed,
+          elapsed,
+          slides,
+          timing,
+          audio,
+          template
+        );
         const duckIfNeeded = (durSec: number) => {
           if (timing.autoDuckMusic !== false && durSec > 0.25) {
             soundEngine.duckBgMusic(exportAudioCtx, durSec, timing.bgMusicDuckRatio ?? 0.22);

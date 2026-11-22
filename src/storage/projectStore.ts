@@ -247,6 +247,28 @@ export function normalizeLoadedProject(
     brandHandleText: mergedTemplate.brandHandleText ?? '',
     brandOpacity: sanitizeNumber(mergedTemplate.brandOpacity, DEFAULT_TEMPLATE.brandOpacity),
     showProgressCounter: mergedTemplate.showProgressCounter ?? false,
+
+    boxStyle: mergedTemplate.boxStyle || 'flat',
+    borderStyle: mergedTemplate.borderStyle || 'solid',
+    shadowIntensity: sanitizeNumber(mergedTemplate.shadowIntensity, 1),
+    glowIntensity: sanitizeNumber(mergedTemplate.glowIntensity, 0),
+    globalScale: sanitizeNumber(mergedTemplate.globalScale, 1),
+    timerScale: sanitizeNumber(mergedTemplate.timerScale, 1),
+    badgeScale: sanitizeNumber(mergedTemplate.badgeScale, 1),
+    bgMotion: mergedTemplate.bgMotion || 'none',
+    revealConfetti: mergedTemplate.revealConfetti ?? false,
+    highlightSpokenOption: mergedTemplate.highlightSpokenOption ?? false,
+    showIntroHook: mergedTemplate.showIntroHook ?? false,
+    introHookText: mergedTemplate.introHookText ?? DEFAULT_TEMPLATE.introHookText,
+    introHookDuration: sanitizeNumber(mergedTemplate.introHookDuration, 1.2),
+    showEndSubscribeCta: mergedTemplate.showEndSubscribeCta ?? false,
+    showPrizeLadder: mergedTemplate.showPrizeLadder ?? false,
+    prizeLadderStyle: mergedTemplate.prizeLadderStyle || 'topStrip',
+    prizeLadderTitle: mergedTemplate.prizeLadderTitle ?? 'الجائزة',
+    prizeLadderAmounts:
+      Array.isArray(mergedTemplate.prizeLadderAmounts) && mergedTemplate.prizeLadderAmounts.length > 0
+        ? mergedTemplate.prizeLadderAmounts
+        : DEFAULT_TEMPLATE.prizeLadderAmounts,
   };
 
   const sanitizedSlides = result.slides.map((s, i) => sanitizeSlide(s, i));

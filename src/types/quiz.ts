@@ -14,11 +14,30 @@ export type OptionLabelStyle = 'arabic' | 'numbers' | 'english' | 'none';
 
 export type TimerStyle = 'channelBox' | 'bar' | 'circle' | 'digits' | 'none';
 
+export type BoxShapeStyle =
+  | 'flat'
+  | 'bevel3d'
+  | 'inset'
+  | 'glass'
+  | 'neon'
+  | 'millionaireHex';
+
+export type BoxBorderStyle = 'solid' | 'double' | 'gradientGold' | 'gradientNeon';
+
+export type BackgroundMotion = 'none' | 'slowZoom' | 'particles' | 'zoomAndParticles';
+
+export type PrizeLadderStyle = 'topStrip' | 'sideColumn';
+
 export type PresetId =
   | 'channelSand'
   | 'channelNavy'
   | 'channelEmerald'
   | 'channelMath'
+  | 'millionaire'
+  | 'tvShowGold'
+  | 'neonCyber'
+  | 'parchmentGold'
+  | 'playfulKids'
   | 'emerald'
   | 'navy'
   | 'obsidian';
@@ -160,6 +179,26 @@ export interface TemplateSettings {
   brandHandleText: string;
   brandOpacity: number; // 0.2..1
   showProgressCounter: boolean;
+
+  // Additive Visual, Depth, Scale & Millionaire Upgrades
+  boxStyle?: BoxShapeStyle;
+  borderStyle?: BoxBorderStyle;
+  shadowIntensity?: number; // 0..1.5
+  glowIntensity?: number; // 0..1
+  globalScale?: number; // 0.75..1.25
+  timerScale?: number; // 0.7..1.4
+  badgeScale?: number; // 0.7..1.4
+  bgMotion?: BackgroundMotion;
+  revealConfetti?: boolean;
+  highlightSpokenOption?: boolean;
+  showIntroHook?: boolean;
+  introHookText?: string;
+  introHookDuration?: number; // 0.6..2.5s
+  showEndSubscribeCta?: boolean;
+  showPrizeLadder?: boolean;
+  prizeLadderStyle?: PrizeLadderStyle;
+  prizeLadderTitle?: string;
+  prizeLadderAmounts?: string[];
 }
 
 export interface TimingSettings {
@@ -230,6 +269,46 @@ export const PRESET_BACKDROPS: PresetBackdropInfo[] = [
     swatchColor: '#113328',
   },
   {
+    id: 'millionaire',
+    label: 'من سيربح المليون 💎',
+    gradientInner: '#1a3b8e',
+    gradientOuter: '#050b24',
+    gradientStop: 0.72,
+    swatchColor: '#10286b',
+  },
+  {
+    id: 'tvShowGold',
+    label: 'بث المسابقات الذهبي 📺',
+    gradientInner: '#2a2461',
+    gradientOuter: '#08091a',
+    gradientStop: 0.72,
+    swatchColor: '#251e57',
+  },
+  {
+    id: 'neonCyber',
+    label: 'النيون الحماسي ⚡',
+    gradientInner: '#171b3d',
+    gradientOuter: '#050712',
+    gradientStop: 0.75,
+    swatchColor: '#0e1633',
+  },
+  {
+    id: 'parchmentGold',
+    label: 'المخطوطة الدافئة 📜',
+    gradientInner: '#f5e8ca',
+    gradientOuter: '#cbb079',
+    gradientStop: 0.85,
+    swatchColor: '#e8d4a2',
+  },
+  {
+    id: 'playfulKids',
+    label: 'ألوان مبهجة 3D 🎨',
+    gradientInner: '#2563eb',
+    gradientOuter: '#0f766e',
+    gradientStop: 0.82,
+    swatchColor: '#1d4ed8',
+  },
+  {
     id: 'emerald',
     label: 'الزمرد الذهبي',
     src: '/src/assets/images/template_emerald_studio_1795289851480.jpg',
@@ -249,11 +328,72 @@ export const PRESET_BACKDROPS: PresetBackdropInfo[] = [
   },
 ];
 
+export const DEFAULT_PRIZE_LADDER: string[] = [
+  '100$',
+  '200$',
+  '300$',
+  '500$',
+  '1,000$',
+  '2,000$',
+  '4,000$',
+  '8,000$',
+  '16,000$',
+  '32,000$',
+  '64,000$',
+  '125,000$',
+  '250,000$',
+  '500,000$',
+  '1,000,000$',
+];
+
+export function getSlidePrizeTiers(slideCount: number, customAmounts?: string[]): string[] {
+  const count = Math.max(1, slideCount);
+  const raw = Array.isArray(customAmounts)
+    ? customAmounts.map((s) => s.trim()).filter(Boolean)
+    : [];
+  const source = raw.length > 0 ? raw : DEFAULT_PRIZE_LADDER;
+
+  if (count === source.length) {
+    return source;
+  }
+  if (count === 1) {
+    return [source[source.length - 1]];
+  }
+  if (count < source.length) {
+    const picked: string[] = [];
+    for (let i = 0; i < count; i++) {
+      const idx =
+        i === count - 1
+          ? source.length - 1
+          : Math.round((i / (count - 1)) * (source.length - 1));
+      picked.push(source[idx]);
+    }
+    return picked;
+  }
+  const expanded: string[] = [];
+  for (let i = 0; i < count; i++) {
+    expanded.push(source[Math.min(i, source.length - 1)]);
+  }
+  return expanded;
+}
+
 export const CHANNEL_THEME_ORDER: ('channelSand' | 'channelNavy' | 'channelEmerald' | 'channelMath')[] = [
   'channelSand',
   'channelNavy',
   'channelEmerald',
   'channelMath',
+];
+
+export const STUDIO_THEME_ORDER: PresetId[] = [
+  'channelSand',
+  'channelNavy',
+  'channelEmerald',
+  'channelMath',
+  'millionaire',
+  'tvShowGold',
+  'neonCyber',
+  'parchmentGold',
+  'playfulKids',
 ];
 
 export function getCanvasDimensions(template?: Pick<TemplateSettings, 'aspectRatio'>): {
@@ -270,9 +410,17 @@ export function applyChannelThemePreset(
   current: TemplateSettings,
   themeId: 'channelSand' | 'channelNavy' | 'channelEmerald' | 'channelMath'
 ): TemplateSettings {
+  const baseReset: Partial<TemplateSettings> = {
+    boxStyle: 'flat',
+    borderStyle: 'solid',
+    shadowIntensity: 1,
+    glowIntensity: 0,
+    showPrizeLadder: false,
+  };
   if (themeId === 'channelMath') {
     return {
       ...current,
+      ...baseReset,
       backgroundType: 'preset',
       presetId: 'channelMath',
       bgDimOpacity: 0.12,
@@ -301,6 +449,7 @@ export function applyChannelThemePreset(
   if (themeId === 'channelNavy') {
     return {
       ...current,
+      ...baseReset,
       backgroundType: 'preset',
       presetId: 'channelNavy',
       bgDimOpacity: 0,
@@ -326,6 +475,7 @@ export function applyChannelThemePreset(
   if (themeId === 'channelEmerald') {
     return {
       ...current,
+      ...baseReset,
       backgroundType: 'preset',
       presetId: 'channelEmerald',
       bgDimOpacity: 0,
@@ -350,6 +500,7 @@ export function applyChannelThemePreset(
   }
   return {
     ...current,
+    ...baseReset,
     backgroundType: 'preset',
     presetId: 'channelSand',
     bgDimOpacity: 0,
@@ -370,6 +521,219 @@ export function applyChannelThemePreset(
     timerMatchBackground: true,
     timerBgColor: '#F2E3BA',
     timerColor: '#000000',
+  };
+}
+
+export function applyStudioThemePreset(
+  current: TemplateSettings,
+  presetId: PresetId
+): TemplateSettings {
+  if (
+    presetId === 'channelSand' ||
+    presetId === 'channelNavy' ||
+    presetId === 'channelEmerald' ||
+    presetId === 'channelMath'
+  ) {
+    return applyChannelThemePreset(current, presetId);
+  }
+
+  if (presetId === 'millionaire') {
+    return {
+      ...current,
+      backgroundType: 'preset',
+      presetId: 'millionaire',
+      bgDimOpacity: 0,
+      bgMotion: 'particles',
+      fontFamily: 'Cairo',
+      boxStyle: 'millionaireHex',
+      borderStyle: 'gradientGold',
+      shadowIntensity: 1.2,
+      glowIntensity: 0.45,
+      boxGloss: true,
+      enhanceAppearance: true,
+      questionTextColor: '#FFFFFF',
+      questionBoxColor: '#091a4a',
+      questionBoxOpacity: 0.96,
+      questionBorderColor: '#e5b84b',
+      questionBorderWidth: 5,
+      questionBorderRadius: 28,
+      optionTextColor: '#FFFFFF',
+      optionBoxColor: '#0b2059',
+      optionBoxOpacity: 0.96,
+      optionBorderColor: '#d4a73a',
+      optionBorderWidth: 4,
+      optionBorderRadius: 24,
+      optionLabelStyle: 'arabic',
+      optionLabelBgColor: '#d4a73a',
+      optionLabelTextColor: '#050b24',
+      correctColor: '#00B050',
+      wrongColor: '#DC2626',
+      revealStyle: 'highlightGlow',
+      timerMatchBackground: true,
+      timerBgColor: '#091a4a',
+      timerColor: '#EDD6A2',
+      showPrizeLadder: true,
+      prizeLadderStyle: current.prizeLadderStyle || 'topStrip',
+      prizeLadderTitle: current.prizeLadderTitle || 'الجائزة',
+      prizeLadderAmounts:
+        current.prizeLadderAmounts && current.prizeLadderAmounts.length > 0
+          ? current.prizeLadderAmounts
+          : [...DEFAULT_PRIZE_LADDER],
+      highlightSpokenOption: true,
+    };
+  }
+
+  if (presetId === 'tvShowGold') {
+    return {
+      ...current,
+      backgroundType: 'preset',
+      presetId: 'tvShowGold',
+      bgDimOpacity: 0,
+      bgMotion: 'zoomAndParticles',
+      boxStyle: 'bevel3d',
+      borderStyle: 'gradientGold',
+      shadowIntensity: 1.25,
+      glowIntensity: 0.35,
+      boxGloss: true,
+      enhanceAppearance: true,
+      questionTextColor: '#FFFFFF',
+      questionBoxColor: '#1e1b4b',
+      questionBoxOpacity: 0.96,
+      questionBorderColor: '#facc15',
+      questionBorderWidth: 5,
+      optionTextColor: '#FFFFFF',
+      optionBoxColor: '#25215c',
+      optionBoxOpacity: 0.96,
+      optionBorderColor: '#eab308',
+      optionBorderWidth: 4,
+      optionLabelBgColor: '#facc15',
+      optionLabelTextColor: '#1e1b4b',
+      correctColor: '#10b981',
+      wrongColor: '#ef4444',
+      revealStyle: 'redWrongGreenCorrect',
+      timerMatchBackground: true,
+      timerBgColor: '#1e1b4b',
+      timerColor: '#fde047',
+      showPrizeLadder: false,
+    };
+  }
+
+  if (presetId === 'neonCyber') {
+    return {
+      ...current,
+      backgroundType: 'preset',
+      presetId: 'neonCyber',
+      bgDimOpacity: 0,
+      bgMotion: 'particles',
+      boxStyle: 'neon',
+      borderStyle: 'gradientNeon',
+      shadowIntensity: 1.1,
+      glowIntensity: 0.85,
+      boxGloss: false,
+      enhanceAppearance: true,
+      questionTextColor: '#F8FAFC',
+      questionBoxColor: '#0b1024',
+      questionBoxOpacity: 0.92,
+      questionBorderColor: '#22d3ee',
+      questionBorderWidth: 4,
+      optionTextColor: '#F8FAFC',
+      optionBoxColor: '#0e142d',
+      optionBoxOpacity: 0.92,
+      optionBorderColor: '#a855f7',
+      optionBorderWidth: 4,
+      optionLabelBgColor: '#22d3ee',
+      optionLabelTextColor: '#050712',
+      correctColor: '#10b981',
+      wrongColor: '#f43f5e',
+      revealStyle: 'redWrongGreenCorrect',
+      timerMatchBackground: true,
+      timerBgColor: '#0b1024',
+      timerColor: '#22d3ee',
+      showPrizeLadder: false,
+    };
+  }
+
+  if (presetId === 'parchmentGold') {
+    return {
+      ...current,
+      backgroundType: 'preset',
+      presetId: 'parchmentGold',
+      bgDimOpacity: 0,
+      bgMotion: 'none',
+      fontFamily: 'Amiri',
+      boxStyle: 'inset',
+      borderStyle: 'double',
+      shadowIntensity: 0.9,
+      glowIntensity: 0.1,
+      boxGloss: false,
+      enhanceAppearance: true,
+      questionTextColor: '#2c1e0f',
+      questionBoxColor: '#f7edd4',
+      questionBoxOpacity: 0.96,
+      questionBorderColor: '#b58428',
+      questionBorderWidth: 5,
+      optionTextColor: '#2c1e0f',
+      optionBoxColor: '#f5e9cb',
+      optionBoxOpacity: 0.96,
+      optionBorderColor: '#b58428',
+      optionBorderWidth: 4,
+      optionLabelBgColor: '#b58428',
+      optionLabelTextColor: '#FFFFFF',
+      correctColor: '#15803d',
+      wrongColor: '#b91c1c',
+      revealStyle: 'dimOthers',
+      timerMatchBackground: true,
+      timerBgColor: '#ebd7a7',
+      timerColor: '#2c1e0f',
+      showPrizeLadder: false,
+    };
+  }
+
+  if (presetId === 'playfulKids') {
+    return {
+      ...current,
+      backgroundType: 'preset',
+      presetId: 'playfulKids',
+      bgDimOpacity: 0,
+      bgMotion: 'particles',
+      fontFamily: 'Cairo',
+      boxStyle: 'bevel3d',
+      borderStyle: 'solid',
+      shadowIntensity: 1.2,
+      glowIntensity: 0.25,
+      boxGloss: true,
+      enhanceAppearance: true,
+      questionTextColor: '#0f172a',
+      questionBoxColor: '#fef08a',
+      questionBoxOpacity: 1,
+      questionBorderColor: '#FFFFFF',
+      questionBorderWidth: 6,
+      optionTextColor: '#0f172a',
+      optionBoxColor: '#ffffff',
+      optionBoxOpacity: 0.98,
+      optionBorderColor: '#38bdf8',
+      optionBorderWidth: 5,
+      optionLabelBgColor: '#f59e0b',
+      optionLabelTextColor: '#FFFFFF',
+      correctColor: '#16a34a',
+      wrongColor: '#ef4444',
+      revealStyle: 'scaleCheck',
+      revealConfetti: true,
+      timerMatchBackground: true,
+      timerBgColor: '#1d4ed8',
+      timerColor: '#FFFFFF',
+      showPrizeLadder: false,
+    };
+  }
+
+  const preset = PRESET_BACKDROPS.find((p) => p.id === presetId);
+  return {
+    ...current,
+    backgroundType: 'preset',
+    presetId,
+    timerMatchBackground: true,
+    timerBgColor: preset?.swatchColor ?? current.timerBgColor,
+    timerColor: '#FFFFFF',
   };
 }
 
@@ -442,6 +806,25 @@ export const DEFAULT_TEMPLATE: TemplateSettings = {
   brandHandleText: '',
   brandOpacity: 0.92,
   showProgressCounter: false,
+
+  boxStyle: 'flat',
+  borderStyle: 'solid',
+  shadowIntensity: 1,
+  glowIntensity: 0,
+  globalScale: 1,
+  timerScale: 1,
+  badgeScale: 1,
+  bgMotion: 'none',
+  revealConfetti: false,
+  highlightSpokenOption: false,
+  showIntroHook: false,
+  introHookText: 'اختبر معلوماتك الآن!',
+  introHookDuration: 1.2,
+  showEndSubscribeCta: false,
+  showPrizeLadder: false,
+  prizeLadderStyle: 'topStrip',
+  prizeLadderTitle: 'الجائزة',
+  prizeLadderAmounts: [...DEFAULT_PRIZE_LADDER],
 };
 
 export const DEFAULT_TIMING: TimingSettings = {
@@ -656,13 +1039,20 @@ export function computeSlideSchedule(
   };
 }
 
+export function getIntroHookDuration(template?: Pick<TemplateSettings, 'showIntroHook' | 'introHookDuration'>): number {
+  if (!template?.showIntroHook) return 0;
+  const dur = Number(template.introHookDuration ?? 1.2);
+  return Math.max(0.5, Math.min(3.5, Number.isFinite(dur) ? dur : 1.2));
+}
+
 export function computeProjectTimeline(
   slides: QuestionSlide[],
   timing: TimingSettings,
-  audio: AudioSettings
+  audio: AudioSettings,
+  template?: TemplateSettings
 ): SlideSchedule[] {
   const schedules: SlideSchedule[] = [];
-  let cursor = 0;
+  let cursor = getIntroHookDuration(template);
   for (let i = 0; i < slides.length; i++) {
     const sched = computeSlideSchedule(slides[i], i, cursor, timing, audio);
     schedules.push(sched);
@@ -674,9 +1064,10 @@ export function computeProjectTimeline(
 export function getSlidesContentDuration(
   slides: QuestionSlide[],
   timing: TimingSettings,
-  audio: AudioSettings
+  audio: AudioSettings,
+  template?: TemplateSettings
 ): number {
-  const schedules = computeProjectTimeline(slides, timing, audio);
+  const schedules = computeProjectTimeline(slides, timing, audio, template);
   if (schedules.length === 0) return 0;
   return schedules[schedules.length - 1].endTime;
 }
@@ -687,7 +1078,7 @@ export function getTotalDuration(
   audio: AudioSettings,
   template?: TemplateSettings
 ): number {
-  const contentDur = getSlidesContentDuration(slides, timing, audio);
+  const contentDur = getSlidesContentDuration(slides, timing, audio, template);
   if (contentDur <= 0) return 0;
   return contentDur + (template?.showEndCard ? END_CARD_DURATION : 0);
 }

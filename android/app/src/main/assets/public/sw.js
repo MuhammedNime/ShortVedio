@@ -87,7 +87,7 @@ define(['./workbox-afac4cd2'], (function (workbox) { 'use strict';
     "revision": "780ee580f3221417358a1ba588d21023"
   }, {
     "url": "index.html",
-    "revision": "9395df226f798b03dbecccb5ef43031d"
+    "revision": "8f01d12481c59dd7222ef3474d88361b"
   }, {
     "url": "icon.svg",
     "revision": "d0c8667cb31ec987bb8d619decf986df"
@@ -158,7 +158,7 @@ define(['./workbox-afac4cd2'], (function (workbox) { 'use strict';
     "url": "assets/workbox-window.prod.es5-Bd17z0YL.js",
     "revision": null
   }, {
-    "url": "assets/web-BU1hVl5F.js",
+    "url": "assets/web-FW3iC27N.js",
     "revision": null
   }, {
     "url": "assets/read-excel-file-BZ04sF_L.js",
@@ -167,13 +167,13 @@ define(['./workbox-afac4cd2'], (function (workbox) { 'use strict';
     "url": "assets/mathlive-DJ-knq2g.js",
     "revision": null
   }, {
-    "url": "assets/mammoth.browser-DaZpPiUw.js",
+    "url": "assets/mammoth.browser-CptM_nOl.js",
     "revision": null
   }, {
-    "url": "assets/index-JHO8hKvo.css",
+    "url": "assets/index-DqYM_MnE.css",
     "revision": null
   }, {
-    "url": "assets/index-1X2IQNy7.js",
+    "url": "assets/index-Aqb0TlvN.js",
     "revision": null
   }, {
     "url": "assets/aistudio/_________021e73d3.html",
