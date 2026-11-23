@@ -43,12 +43,28 @@ const TRUE_FALSE_SUGGESTIONS = [
   'عجائب الفضاء والطبيعة',
 ];
 
+const CLUES_SUGGESTIONS = [
+  'دول وعواصم عربية وعالمية',
+  'شخصيات وعلماء عبر التاريخ',
+  'حيوانات ومخلوقات مدهشة',
+  'اختراعات وأشياء يومية شهيرة',
+];
+
+const VERSUS_SUGGESTIONS = [
+  'أيهما أكبر أو أسرع أو أقدم في الطبيعة',
+  'مقارنات علمية وفيزيائية مذهلة',
+  'دول ومدن ومباني تاريخية شهيرة',
+  'جسم الإنسان والحيوانات والفضاء',
+];
+
 export const AiGeneratorPanel: React.FC<AiGeneratorPanelProps> = ({
   voiceName,
   onVoiceChange,
   onInsertSlides,
 }) => {
-  const [contentType, setContentType] = useState<'general' | 'math' | 'trueFalse'>('general');
+  const [contentType, setContentType] = useState<
+    'general' | 'math' | 'trueFalse' | 'clues' | 'versus'
+  >('general');
   const [autoApplyMathTheme, setAutoApplyMathTheme] = useState(true);
   const [topic, setTopic] = useState('');
   const [count, setCount] = useState(2);
@@ -64,7 +80,11 @@ export const AiGeneratorPanel: React.FC<AiGeneratorPanelProps> = ({
       ? MATH_SUGGESTIONS
       : contentType === 'trueFalse'
         ? TRUE_FALSE_SUGGESTIONS
-        : GENERAL_SUGGESTIONS;
+        : contentType === 'clues'
+          ? CLUES_SUGGESTIONS
+          : contentType === 'versus'
+            ? VERSUS_SUGGESTIONS
+            : GENERAL_SUGGESTIONS;
 
   const handleGenerate = async (insertMode: 'append' | 'replace') => {
     const trimmed = topic.trim();
@@ -128,59 +148,58 @@ export const AiGeneratorPanel: React.FC<AiGeneratorPanelProps> = ({
     }
   };
 
+  const fullVoiceCountLabel =
+    contentType === 'trueFalse'
+      ? '+خيارين (4)'
+      : contentType === 'versus'
+        ? '+الطرفين (4)'
+        : contentType === 'clues'
+          ? '+3 تلميحات (5)'
+          : '+4 خيارات (6)';
+
   return (
-    <div className="flex flex-col gap-5">
+    <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
         <h2 className="text-sm font-bold text-[var(--ptxt)]">
           توليد الأسئلة والصوت بالذكاء الاصطناعي
         </h2>
         <p className="text-xs text-[var(--pmuted)] leading-relaxed">
-          أنشئ أسئلة ثقافية أو معادلات رياضيات بالرموز والكسور، مع توليد صوت المذيع
-          للسؤال والخيارات الأربعة والحل تلقائياً.
+          أنشئ أسئلة ثقافية، صح أم خطأ، تحدي 3 تلميحات (من أنا؟)، مقارنة VS، أو معادلات
+          رياضيات مع تعليق صوتي متزامن تلقائياً.
         </p>
       </div>
 
-      {/* Content Mode Switch: General vs True/False vs Math */}
+      {/* Content Mode Switch */}
       <div className="flex flex-col gap-2">
-        <div className="grid grid-cols-3 gap-1.5 p-1 rounded-xl bg-[var(--surface)] border border-[var(--pline)]">
-          <button
-            type="button"
-            disabled={isGenerating}
-            onClick={() => setContentType('general')}
-            className={`flex items-center justify-center gap-1 py-2 px-1 rounded-lg text-[11px] font-bold transition-colors cursor-pointer ${
-              contentType === 'general'
-                ? 'bg-[#00B050] text-white'
-                : 'text-[var(--pmuted)] hover:text-[var(--ptxt)]'
-            }`}
-          >
-            <Sparkles className="w-3.5 h-3.5" />
-            <span>ثقافة (4 خيارات)</span>
-          </button>
-          <button
-            type="button"
-            disabled={isGenerating}
-            onClick={() => setContentType('trueFalse')}
-            className={`flex items-center justify-center gap-1 py-2 px-1 rounded-lg text-[11px] font-bold transition-colors cursor-pointer ${
-              contentType === 'trueFalse'
-                ? 'bg-[#00B050] text-white'
-                : 'text-[var(--pmuted)] hover:text-[var(--ptxt)]'
-            }`}
-          >
-            <span>صح أم خطأ ✓✗</span>
-          </button>
-          <button
-            type="button"
-            disabled={isGenerating}
-            onClick={() => setContentType('math')}
-            className={`flex items-center justify-center gap-1 py-2 px-1 rounded-lg text-[11px] font-bold transition-colors cursor-pointer ${
-              contentType === 'math'
-                ? 'bg-[#00B050] text-white'
-                : 'text-[var(--pmuted)] hover:text-[var(--ptxt)]'
-            }`}
-          >
-            <Calculator className="w-3.5 h-3.5" />
-            <span>رياضيات 🧮</span>
-          </button>
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5 p-1 rounded-xl bg-[var(--surface)] border border-[var(--pline)]">
+          {(
+            [
+              { id: 'general', label: 'ثقافة (4 خيارات)', icon: 'sparkles' },
+              { id: 'trueFalse', label: 'صح أم خطأ ✓✗', icon: 'none' },
+              { id: 'clues', label: '3 تلميحات 🔍', icon: 'none' },
+              { id: 'versus', label: 'مقارنة VS ⚡', icon: 'none' },
+              { id: 'math', label: 'رياضيات 🧮', icon: 'calc' },
+            ] as const
+          ).map((modeBtn) => {
+            const active = contentType === modeBtn.id;
+            return (
+              <button
+                key={modeBtn.id}
+                type="button"
+                disabled={isGenerating}
+                onClick={() => setContentType(modeBtn.id)}
+                className={`flex items-center justify-center gap-1 py-2 px-1.5 rounded-lg text-[11px] font-bold transition-colors whitespace-nowrap cursor-pointer ${
+                  active
+                    ? 'bg-[#00B050] text-white'
+                    : 'text-[var(--pmuted)] hover:text-[var(--ptxt)] hover:bg-[var(--panel)]'
+                }`}
+              >
+                {modeBtn.icon === 'sparkles' && <Sparkles className="w-3.5 h-3.5 shrink-0" />}
+                {modeBtn.icon === 'calc' && <Calculator className="w-3.5 h-3.5 shrink-0" />}
+                <span>{modeBtn.label}</span>
+              </button>
+            );
+          })}
         </div>
 
         {contentType === 'math' && (
@@ -205,7 +224,11 @@ export const AiGeneratorPanel: React.FC<AiGeneratorPanelProps> = ({
             ? 'موضوع الرياضيات أو الدرس المطلوب'
             : contentType === 'trueFalse'
               ? 'موضوع تحدي صح أم خطأ'
-              : 'فكرة الفيديو أو الموضوع'}
+              : contentType === 'clues'
+                ? 'موضوع ألغاز (من أنا؟ / 3 تلميحات)'
+                : contentType === 'versus'
+                  ? 'موضوع تحدي المقارنة (VS)'
+                  : 'فكرة الفيديو أو الموضوع'}
         </label>
         <textarea
           rows={3}
@@ -217,7 +240,11 @@ export const AiGeneratorPanel: React.FC<AiGeneratorPanelProps> = ({
               ? 'مثال: جمع الكسور والجذور التربيعية للمرحلة الإعدادية...'
               : contentType === 'trueFalse'
                 ? 'مثال: حقائق علمية وجغرافية غريبة بصيغة صح أم خطأ...'
-                : 'مثال: 3 أسئلة دينية سهلة عن الأنبياء أو الثقافة العامة...'
+                : contentType === 'clues'
+                  ? 'مثال: شخصيات تاريخية أو دول عربية بأسلوب 3 تلميحات ومن أنا؟...'
+                  : contentType === 'versus'
+                    ? 'مثال: مقارنات مدهشة بين دول أو كواكب أو حيوانات (أيهما أكبر/أسرع)...'
+                    : 'مثال: 3 أسئلة دينية سهلة عن الأنبياء أو الثقافة العامة...'
           }
           className="w-full px-3.5 py-2.5 rounded-xl bg-[var(--surface)] border border-[var(--pline)] focus:border-[#00B050] focus:outline-none text-sm text-[var(--ptxt)] placeholder:text-[var(--pmuted)] resize-none leading-relaxed"
         />
@@ -330,7 +357,7 @@ export const AiGeneratorPanel: React.FC<AiGeneratorPanelProps> = ({
                   type="button"
                   disabled={isGenerating}
                   onClick={() => setVoiceMode('questionOnly')}
-                  className={`py-1.5 px-1 rounded-md text-[11px] font-bold transition-colors cursor-pointer ${
+                  className={`py-1.5 px-1 rounded-md text-[11px] font-bold transition-colors whitespace-nowrap cursor-pointer ${
                     voiceMode === 'questionOnly'
                       ? 'bg-[#00B050]/18 text-[#00B050] dark:text-[#6ee7b7] border border-[#00B050]/40'
                       : 'text-[var(--pmuted)] hover:text-[var(--ptxt)]'
@@ -342,7 +369,7 @@ export const AiGeneratorPanel: React.FC<AiGeneratorPanelProps> = ({
                   type="button"
                   disabled={isGenerating}
                   onClick={() => setVoiceMode('questionAndAnswer')}
-                  className={`py-1.5 px-1 rounded-md text-[11px] font-bold transition-colors cursor-pointer ${
+                  className={`py-1.5 px-1 rounded-md text-[11px] font-bold transition-colors whitespace-nowrap cursor-pointer ${
                     voiceMode === 'questionAndAnswer'
                       ? 'bg-[#00B050]/18 text-[#00B050] dark:text-[#6ee7b7] border border-[#00B050]/40'
                       : 'text-[var(--pmuted)] hover:text-[var(--ptxt)]'
@@ -354,13 +381,13 @@ export const AiGeneratorPanel: React.FC<AiGeneratorPanelProps> = ({
                   type="button"
                   disabled={isGenerating}
                   onClick={() => setVoiceMode('full')}
-                  className={`py-1.5 px-1 rounded-md text-[11px] font-bold transition-colors cursor-pointer ${
+                  className={`py-1.5 px-1 rounded-md text-[11px] font-bold transition-colors whitespace-nowrap cursor-pointer ${
                     voiceMode === 'full'
                       ? 'bg-[#00B050]/18 text-[#00B050] dark:text-[#6ee7b7] border border-[#00B050]/40'
                       : 'text-[var(--pmuted)] hover:text-[var(--ptxt)]'
                   }`}
                 >
-                  {contentType === 'trueFalse' ? '+خيارين (4)' : '+4 خيارات (6)'}
+                  {fullVoiceCountLabel}
                 </button>
               </div>
             </div>

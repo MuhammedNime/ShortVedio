@@ -2,7 +2,15 @@ import React, { useState } from 'react';
 import { Download } from 'lucide-react';
 import { usePWAInstall } from '../hooks/usePWAInstall';
 
-export const PWAInstallButton: React.FC = () => {
+interface PWAInstallButtonProps {
+  variant?: 'inline' | 'menuItem';
+  onAction?: () => void;
+}
+
+export const PWAInstallButton: React.FC<PWAInstallButtonProps> = ({
+  variant = 'inline',
+  onAction,
+}) => {
   const { isInstallable, isInstalled, isIOS, install } = usePWAInstall();
   const [showIOSGuide, setShowIOSGuide] = useState(false);
 
@@ -10,15 +18,23 @@ export const PWAInstallButton: React.FC = () => {
     return null;
   }
 
+  const baseClass =
+    variant === 'menuItem'
+      ? 'flex items-center gap-2 w-full px-3 py-2 rounded-lg text-xs font-semibold text-[#00B050] dark:text-[#6ee7b7] hover:bg-[var(--surface)] transition-colors cursor-pointer whitespace-nowrap'
+      : 'flex items-center gap-1 text-[11px] font-bold text-[#00B050] dark:text-[#6ee7b7] hover:underline cursor-pointer whitespace-nowrap';
+
   if (isInstallable) {
     return (
       <button
         type="button"
-        onClick={() => void install()}
-        className="flex items-center gap-1 text-[11px] font-bold text-[#00B050] dark:text-[#6ee7b7] hover:underline cursor-pointer whitespace-nowrap"
+        onClick={() => {
+          onAction?.();
+          void install();
+        }}
+        className={baseClass}
         title="تثبيت التطبيق على الجهاز"
       >
-        <Download className="w-3.5 h-3.5" />
+        <Download className="w-3.5 h-3.5 shrink-0" />
         <span>تثبيت التطبيق</span>
       </button>
     );
@@ -30,9 +46,9 @@ export const PWAInstallButton: React.FC = () => {
         <button
           type="button"
           onClick={() => setShowIOSGuide(true)}
-          className="flex items-center gap-1 text-[11px] font-bold text-[#00B050] dark:text-[#6ee7b7] hover:underline cursor-pointer whitespace-nowrap"
+          className={baseClass}
         >
-          <Download className="w-3.5 h-3.5" />
+          <Download className="w-3.5 h-3.5 shrink-0" />
           <span>تثبيت على iOS</span>
         </button>
 

@@ -5,8 +5,6 @@ import {
   ChevronLeft,
   ChevronRight,
   ChevronUp,
-  Eye,
-  EyeOff,
   Maximize2,
   Minimize2,
   Monitor,
@@ -91,7 +89,6 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
   const timeLabelRef = useRef<HTMLSpanElement | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
-  const [hideControlsOverlay, setHideControlsOverlay] = useState(false);
   const [isCapturingThumb, setIsCapturingThumb] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [dragMode, setDragMode] = useState(false);
@@ -748,7 +745,13 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
     const schedules = computeProjectTimeline(slides, timing, audio, template);
     const sched = schedules[activeSlideIndex] ?? schedules[0];
     if (!sched) return;
-    const isTF = slides[activeSlideIndex]?.slideType === 'trueFalse';
+    const activeType = slides[activeSlideIndex]?.slideType;
+    const lastOptIdx =
+      activeType === 'trueFalse' || activeType === 'versus'
+        ? 1
+        : activeType === 'clues'
+          ? 2
+          : 3;
 
     let target = sched.startTime + sched.tQuestionStart + 0.36;
     if (phase === 'intro') {
@@ -756,7 +759,7 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
     } else if (phase === 'opt1') {
       target = sched.startTime + sched.tOptionStarts[0] + 0.36;
     } else if (phase === 'opt4') {
-      target = sched.startTime + sched.tOptionStarts[isTF ? 1 : 3] + 0.36;
+      target = sched.startTime + sched.tOptionStarts[lastOptIdx] + 0.36;
     } else if (phase === 'timer') {
       target = sched.startTime + sched.tThinkingStart + Math.min(1.1, timing.thinkingDuration * 0.25);
     } else if (phase === 'suspense') {
@@ -816,22 +819,43 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
     if (activePhaseId === 'intro') return 'المقدمة';
     if (activePhaseId === 'end') return 'النهاية';
     if (activePhaseId === 'question') return 'السؤال';
-    if (activePhaseId === 'opt1' || activePhaseId === 'opt4') return 'ظهور الخيارات';
-    if (activePhaseId === 'timer') return 'العد التنازلي ⏱️';
-    if (activePhaseId === 'suspense') return 'التشويق 🔥';
+    if (activePhaseId === 'opt1' || activePhaseId === 'opt4') {
+      const st = slides[activeSlideIndex]?.slideType;
+      return st === 'clues' ? 'ظهور التلميحات' : st === 'versus' ? 'ظهور الطرفين' : 'ظهور الخيارات';
+    }
+    if (activePhaseId === 'timer') return 'العد التنازلي';
+    if (activePhaseId === 'suspense') return 'التشويق';
     if (activePhaseId === 'reveal') return 'كشف الجواب ✓';
     return '';
   })();
 
-  const isActiveTF = slides[activeSlideIndex]?.slideType === 'trueFalse';
+  const activeSlideType = slides[activeSlideIndex]?.slideType;
   const phases: {
     id: 'intro' | 'question' | 'opt1' | 'opt4' | 'timer' | 'suspense' | 'reveal' | 'end';
     label: string;
   }[] = [
     ...(template.showIntroHook ? [{ id: 'intro' as const, label: 'المقدمة' }] : []),
     { id: 'question', label: 'السؤال' },
-    { id: 'opt1', label: 'خيار 1' },
-    { id: 'opt4', label: isActiveTF ? 'الخياران' : 'كل الخيارات' },
+    {
+      id: 'opt1',
+      label:
+        activeSlideType === 'clues'
+          ? 'تلميح 1'
+          : activeSlideType === 'versus'
+            ? 'طرف 1'
+            : 'خيار 1',
+    },
+    {
+      id: 'opt4',
+      label:
+        activeSlideType === 'trueFalse'
+          ? 'الخياران'
+          : activeSlideType === 'versus'
+            ? 'الطرفان'
+            : activeSlideType === 'clues'
+              ? 'تلميح 3'
+              : 'كل الخيارات',
+    },
     { id: 'timer', label: 'المؤقت' },
     ...(timing.suspenseDuration > 0 ? [{ id: 'suspense' as const, label: 'التشويق' }] : []),
     { id: 'reveal', label: 'الناتج' },
@@ -845,7 +869,7 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
     <div
       className={`flex flex-col items-center justify-between w-full ${
         isCollapsedMobile ? 'lg:h-full' : 'h-full'
-      } ${isCompactMobile ? 'gap-1.5 py-1.5 px-2.5 lg:gap-3 lg:py-3 lg:px-4' : 'gap-2.5 py-2.5 px-3 lg:gap-3 lg:py-3 lg:px-4'}`}
+      } ${isCompactMobile ? 'gap-1.5 py-1.5 px-2.5 lg:gap-2.5 lg:py-3 lg:px-4' : 'gap-2 py-2 px-3 lg:gap-2.5 lg:py-3 lg:px-4'}`}
     >
       {/* Mobile Collapsed Mini Bar */}
       {isCollapsedMobile && onChangeMobileStageMode && (
@@ -875,36 +899,34 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
       )}
 
       {/* Stage Quick Jump Bar */}
-      {!hideControlsOverlay && (
-        <div
-          className={`${
-            isCollapsedMobile ? 'hidden lg:flex' : 'flex'
-          } items-center lg:flex-wrap lg:justify-center gap-1.5 w-full max-w-2xl overflow-x-auto no-scrollbar`}
-        >
-          <span className="text-[11px] lg:text-xs text-[var(--pmuted)] ml-1 whitespace-nowrap shrink-0">
-            معاينة:
-          </span>
-          {phases.map((p) => {
-            const isActivePhase = activePhaseId === p.id;
-            return (
-              <button
-                key={p.id}
-                type="button"
-                onClick={() => jumpToPhase(p.id)}
-                className={`px-2 py-0.5 lg:px-2.5 lg:py-1 text-[11px] lg:text-xs font-semibold rounded-md border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                  isActivePhase
-                    ? 'bg-[#00B050] text-white border-[#00B050]'
-                    : 'bg-[var(--panel)] hover:border-[var(--gold)] text-[var(--ptxt)] border-[var(--pline)]'
-                }`}
-              >
-                {p.label}
-              </button>
-            );
-          })}
-        </div>
-      )}
+      <div
+        className={`${
+          isCollapsedMobile ? 'hidden lg:flex' : 'flex'
+        } items-center lg:flex-wrap lg:justify-center gap-1 w-full max-w-2xl overflow-x-auto no-scrollbar`}
+      >
+        <span className="text-[11px] text-[var(--pmuted)] ml-1 whitespace-nowrap shrink-0">
+          الانتقال:
+        </span>
+        {phases.map((p) => {
+          const isActivePhase = activePhaseId === p.id;
+          return (
+            <button
+              key={p.id}
+              type="button"
+              onClick={() => jumpToPhase(p.id)}
+              className={`px-2 py-0.5 lg:px-2.5 lg:py-1 text-[11px] font-semibold rounded-md border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                isActivePhase
+                  ? 'bg-[#00B050] text-white border-[#00B050]'
+                  : 'bg-[var(--panel)] hover:border-[var(--gold)] text-[var(--ptxt)] border-[var(--pline)]'
+              }`}
+            >
+              {p.label}
+            </button>
+          );
+        })}
+      </div>
 
-      {/* Stage Frame: Adaptive 9:16 Vertical Shorts OR 16:9 Landscape Long Video */}
+      {/* Pure Unobstructed Stage Frame: 9:16 Vertical Shorts OR 16:9 Landscape Video */}
       <div
         className={`${
           isCollapsedMobile ? 'hidden lg:flex' : 'flex'
@@ -935,95 +957,34 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
             }`}
           />
 
-          {dragMode && !hideControlsOverlay && (
+          {dragMode && (
             <div className="pointer-events-none absolute bottom-2.5 inset-x-2 flex justify-center">
-              <span className="px-3 py-1 rounded-full bg-[#00B050]/92 text-white text-[11px] font-bold shadow-lg">
+              <span className="px-3 py-1 rounded-lg bg-[#00B050]/95 text-white text-[11px] font-bold shadow-lg">
                 اسحب السؤال أو الخيارات أو المؤقت أو الشارة أو الشعار مباشرة
               </span>
             </div>
           )}
-
-          {/* Floating Channel-Style Top Quick Action Strip */}
-          <div
-            className={`absolute top-2.5 inset-x-2 flex items-center justify-center gap-1.5 transition-opacity duration-200 ${
-              hideControlsOverlay ? 'opacity-0 pointer-events-none' : 'opacity-100'
-            }`}
-          >
-            <button
-              type="button"
-              onClick={() => handleStepSlide(-1)}
-              disabled={activeSlideIndex <= 0}
-              title="السؤال السابق"
-              className="w-8 h-8 rounded-full bg-black/65 hover:bg-black/85 disabled:opacity-35 text-white flex items-center justify-center border border-white/15 cursor-pointer"
-            >
-              <ChevronRight className="w-4 h-4" />
-            </button>
-            <button
-              type="button"
-              onClick={handleTogglePlay}
-              title={isPlaying ? 'إيقاف مؤقت' : 'تشغيل'}
-              className="w-8 h-8 rounded-full bg-[#00B050] hover:bg-[#00c85b] text-white flex items-center justify-center border border-white/25 cursor-pointer"
-            >
-              {isPlaying ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
-            </button>
-            <button
-              type="button"
-              onClick={() => handleStepSlide(1)}
-              disabled={activeSlideIndex >= slides.length - 1}
-              title="السؤال التالي"
-              className="w-8 h-8 rounded-full bg-black/65 hover:bg-black/85 disabled:opacity-35 text-white flex items-center justify-center border border-white/15 cursor-pointer"
-            >
-              <ChevronLeft className="w-4 h-4" />
-            </button>
-            <button
-              type="button"
-              onClick={onCycleChannelTheme}
-              title="تبديل ألوان القالب (رملي / كحلي / زمردي / سبورة رياضيات)"
-              className="w-8 h-8 rounded-full bg-black/65 hover:bg-black/85 text-[#EDD6A2] flex items-center justify-center border border-white/15 cursor-pointer"
-            >
-              <Palette className="w-3.5 h-3.5" />
-            </button>
-            <button
-              type="button"
-              onClick={handleToggleMute}
-              title={isMuted ? 'تشغيل الصوت' : 'كتم الصوت'}
-              className={`w-8 h-8 rounded-full flex items-center justify-center border cursor-pointer ${
-                isMuted
-                  ? 'bg-rose-600/80 text-white border-rose-400'
-                  : 'bg-black/65 hover:bg-black/85 text-white border-white/15'
-              }`}
-            >
-              {isMuted ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
-            </button>
-          </div>
-
-          <button
-            type="button"
-            onClick={() => setHideControlsOverlay((v) => !v)}
-            title={hideControlsOverlay ? 'إظهار أزرار المعاينة' : 'إخفاء أزرار المعاينة'}
-            className="absolute top-2.5 left-2.5 w-7 h-7 rounded-full bg-black/40 hover:bg-black/75 text-white/75 hover:text-white flex items-center justify-center transition-colors cursor-pointer"
-          >
-            {hideControlsOverlay ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
-          </button>
         </div>
       </div>
 
-      {/* Bottom Scrubber & Controls */}
+      {/* Clean Single-Truth Bottom Control Dock */}
       <div
         className={`${
           isCollapsedMobile ? 'hidden lg:flex' : 'flex'
-        } w-full max-w-lg bg-[var(--panel)] border border-[var(--pline)] rounded-xl ${
-          isCompactMobile ? 'p-2 lg:p-3 gap-1.5 lg:gap-2.5' : 'p-3 gap-2.5'
+        } w-full max-w-2xl bg-[var(--panel)] border border-[var(--pline)] rounded-xl ${
+          isCompactMobile ? 'p-2 lg:px-3 lg:py-2.5 gap-1.5 lg:gap-2' : 'px-3 py-2.5 gap-2'
         } flex-col`}
       >
-        <div className="flex items-center gap-2 lg:gap-3">
+        {/* Row 1: Primary Play CTA + Scrubber + Timecode + Mute + Mobile Mode Controls */}
+        <div className="flex items-center gap-2 lg:gap-2.5">
           <button
             type="button"
             onClick={handleTogglePlay}
-            className="lg:hidden flex items-center justify-center w-8 h-8 rounded-lg bg-[#00B050] text-white shrink-0 cursor-pointer"
-            title={isPlaying ? 'إيقاف' : 'تشغيل'}
+            className="flex items-center justify-center gap-1.5 h-8 lg:h-9 px-2.5 lg:px-3.5 rounded-lg bg-[#00B050] hover:bg-[#00c85b] text-white text-xs font-bold transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            title={isPlaying ? 'إيقاف مؤقت' : 'تشغيل المعاينة'}
           >
-            {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
+            {isPlaying ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
+            <span className="hidden sm:inline">{isPlaying ? 'إيقاف' : 'تشغيل'}</span>
           </button>
 
           <input
@@ -1037,6 +998,7 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
             aria-label="الجدول الزمني للفيديو"
             className="w-full h-1.5 rounded-lg bg-[var(--surface)] cursor-pointer"
           />
+
           <span
             ref={timeLabelRef}
             className="font-mono-nums text-[11px] lg:text-xs text-[var(--ptxt)] whitespace-nowrap shrink-0"
@@ -1044,6 +1006,19 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
           >
             {formatTimecode(currentTime)} / {formatTimecode(totalDuration)}
           </span>
+
+          <button
+            type="button"
+            onClick={handleToggleMute}
+            title={isMuted ? 'تشغيل الصوت' : 'كتم الصوت'}
+            className={`w-8 h-8 rounded-lg flex items-center justify-center border shrink-0 transition-colors cursor-pointer ${
+              isMuted
+                ? 'bg-rose-500/15 text-rose-400 border-rose-500/40'
+                : 'bg-[var(--surface)] border-[var(--pline)] text-[var(--ptxt)] hover:border-[var(--gold)]'
+            }`}
+          >
+            {isMuted ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
+          </button>
 
           {/* Mobile compact bar quick controls */}
           {onChangeMobileStageMode && (
@@ -1057,7 +1032,7 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
                     setActiveDragTarget(null);
                   }}
                   title="تحريك حر"
-                  className={`p-1.5 rounded-lg border cursor-pointer ${
+                  className={`w-8 h-8 flex items-center justify-center rounded-lg border cursor-pointer ${
                     dragMode
                       ? 'bg-[#00B050] border-[#00B050] text-white'
                       : 'bg-[var(--surface)] border-[var(--pline)] text-[var(--ptxt)]'
@@ -1074,7 +1049,7 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
                   )
                 }
                 title={mobileStageMode === 'expanded' ? 'تصغير والعودة للمحرر' : 'تكبير المعاينة'}
-                className="p-1.5 rounded-lg bg-[var(--surface)] border border-[var(--pline)] text-[var(--ptxt)] cursor-pointer"
+                className="w-8 h-8 flex items-center justify-center rounded-lg bg-[var(--surface)] border border-[var(--pline)] text-[var(--ptxt)] cursor-pointer"
               >
                 {mobileStageMode === 'expanded' ? (
                   <Minimize2 className="w-3.5 h-3.5 text-[#00B050]" />
@@ -1087,7 +1062,7 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
                   type="button"
                   onClick={() => onChangeMobileStageMode('collapsed')}
                   title="طي الشاشة لتوسيع المحرر"
-                  className="p-1.5 rounded-lg bg-[var(--surface)] border border-[var(--pline)] text-[var(--pmuted)] cursor-pointer"
+                  className="w-8 h-8 flex items-center justify-center rounded-lg bg-[var(--surface)] border border-[var(--pline)] text-[var(--pmuted)] cursor-pointer"
                 >
                   <ChevronUp className="w-3.5 h-3.5" />
                 </button>
@@ -1096,42 +1071,61 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
           )}
         </div>
 
+        {/* Row 2: Slide Stepper + Quick Stage Tools */}
         <div
           className={`${
             isCompactMobile ? 'hidden lg:flex' : 'flex'
-          } flex-wrap items-center justify-between gap-2`}
+          } flex-wrap items-center justify-between gap-2 pt-1 border-t border-[var(--pline)]/60`}
         >
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={handleTogglePlay}
-              className="flex items-center gap-2 px-4 py-2 rounded-lg bg-[#00B050] hover:bg-[#00c85b] text-white text-sm font-bold transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-            >
-              {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
-              <span>{isPlaying ? 'إيقاف' : 'تشغيل المعاينة'}</span>
-            </button>
+          <div className="flex items-center gap-1.5">
+            {slides.length > 1 && (
+              <div className="flex items-center rounded-lg bg-[var(--surface)] border border-[var(--pline)] overflow-hidden">
+                <button
+                  type="button"
+                  onClick={() => handleStepSlide(-1)}
+                  disabled={activeSlideIndex <= 0}
+                  title="السؤال السابق"
+                  className="h-8 px-2 text-[var(--ptxt)] hover:bg-[#00B050]/12 disabled:opacity-35 cursor-pointer"
+                >
+                  <ChevronRight className="w-3.5 h-3.5" />
+                </button>
+                <span className="px-1.5 text-[11px] font-mono-nums font-bold text-[var(--pmuted)] whitespace-nowrap">
+                  {activeSlideIndex + 1}/{slides.length}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => handleStepSlide(1)}
+                  disabled={activeSlideIndex >= slides.length - 1}
+                  title="السؤال التالي"
+                  className="h-8 px-2 text-[var(--ptxt)] hover:bg-[#00B050]/12 disabled:opacity-35 border-r border-[var(--pline)] cursor-pointer"
+                >
+                  <ChevronLeft className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
 
             <button
               type="button"
               onClick={handleRestart}
-              title="تشغيل الفيديو كامل من الأول"
-              className="p-2.5 rounded-lg bg-[var(--surface)] hover:border-[var(--gold)] text-[var(--ptxt)] border border-[var(--pline)] transition-colors cursor-pointer"
+              title="تشغيل الفيديو من البداية"
+              className="flex items-center gap-1 h-8 px-2.5 rounded-lg bg-[var(--surface)] hover:border-[var(--gold)] text-[var(--ptxt)] border border-[var(--pline)] text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
-              <RotateCcw className="w-4 h-4" />
+              <RotateCcw className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">من الأول</span>
             </button>
 
             <button
               type="button"
               onClick={handlePlayCurrentSlide}
               title="تشغيل السؤال الحالي من بدايته"
-              className="px-2.5 py-2 rounded-lg bg-[var(--surface)] hover:border-[#00B050] text-[var(--ptxt)] border border-[var(--pline)] text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer"
+              className="h-8 px-2.5 rounded-lg bg-[var(--surface)] hover:border-[#00B050] text-[var(--ptxt)] border border-[var(--pline)] text-xs font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               السؤال الحالي
             </button>
 
             {currentPhaseLabel && (
-              <span className="hidden sm:inline-block px-2 py-1 rounded-md bg-[var(--surface)] border border-[var(--pline)] text-[11px] font-bold text-[#EDD6A2] whitespace-nowrap">
-                {currentPhaseLabel}
+              <span className="hidden sm:inline-block text-[11px] font-semibold text-[var(--gold)] whitespace-nowrap pr-1">
+                · {currentPhaseLabel}
               </span>
             )}
           </div>
@@ -1142,14 +1136,14 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
                 type="button"
                 onClick={onToggleAspectRatio}
                 title="تبديل أبعاد الفيديو بين شورتس 9:16 وفيديو طويل 16:9"
-                className={`flex items-center gap-1.5 px-2.5 py-2 rounded-lg text-xs font-bold border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                className={`flex items-center gap-1 h-8 px-2.5 rounded-lg text-xs font-bold border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                   isWide
                     ? 'bg-[#00B050]/18 border-[#00B050] text-[#00B050] dark:text-[#6ee7b7]'
                     : 'bg-[var(--surface)] border-[var(--pline)] text-[var(--ptxt)] hover:border-[var(--gold)]'
                 }`}
               >
                 {isWide ? <Monitor className="w-3.5 h-3.5" /> : <Smartphone className="w-3.5 h-3.5" />}
-                <span>{isWide ? '16:9 طويل' : '9:16 شورتس'}</span>
+                <span>{isWide ? '16:9' : '9:16'}</span>
               </button>
             )}
 
@@ -1157,7 +1151,7 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
               type="button"
               onClick={onCycleChannelTheme}
               title="تبديل سريع لثيم القناة"
-              className="flex items-center gap-1.5 px-2.5 py-2 rounded-lg text-xs font-semibold bg-[var(--surface)] border border-[var(--pline)] text-[var(--sand)] hover:border-[var(--gold)] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              className="flex items-center gap-1 h-8 px-2.5 rounded-lg text-xs font-semibold bg-[var(--surface)] border border-[var(--pline)] text-[var(--sand)] hover:border-[var(--gold)] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               <Palette className="w-3.5 h-3.5" />
               <span>الثيم</span>
@@ -1168,7 +1162,7 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
               onClick={() => void handleCaptureThumbnail()}
               disabled={isCapturingThumb}
               title="حفظ اللقطة الحالية كصورة غلاف JPG بدقة عالية"
-              className="flex items-center gap-1.5 px-2.5 py-2 rounded-lg text-xs font-semibold bg-[var(--surface)] border border-[var(--pline)] text-[var(--ptxt)] hover:border-[#00B050] disabled:opacity-50 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              className="flex items-center gap-1 h-8 px-2.5 rounded-lg text-xs font-semibold bg-[var(--surface)] border border-[var(--pline)] text-[var(--ptxt)] hover:border-[#00B050] disabled:opacity-50 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               <Camera className="w-3.5 h-3.5 text-[#00B050]" />
               <span>{isCapturingThumb ? 'جارٍ الحفظ...' : 'غلاف JPG'}</span>
@@ -1182,8 +1176,8 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
                   setDragMode((v) => !v);
                   setActiveDragTarget(null);
                 }}
-                title="سحب وتحريك أي عنصر بالماوس مباشرة على الشاشة"
-                className={`flex items-center gap-1.5 px-2.5 py-2 rounded-lg text-xs font-bold border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                title="سحب وتحريك أي عنصر مباشرة على الشاشة"
+                className={`flex items-center gap-1 h-8 px-2.5 rounded-lg text-xs font-bold border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                   dragMode
                     ? 'bg-[#00B050] border-[#00B050] text-white'
                     : 'bg-[var(--surface)] border-[var(--pline)] text-[var(--ptxt)] hover:border-[#00B050]'
@@ -1198,7 +1192,7 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
               type="button"
               onClick={onToggleSafeGuides}
               title="إظهار حدود أزرار يوتيوب"
-              className={`flex items-center gap-1.5 px-2.5 py-2 rounded-lg text-xs font-semibold border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+              className={`flex items-center gap-1 h-8 px-2.5 rounded-lg text-xs font-semibold border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                 template.showSafeGuides
                   ? 'bg-[#d4a73a]/20 border-[#d4a73a] text-[#EDD6A2]'
                   : 'bg-[var(--surface)] border-[var(--pline)] text-[var(--pmuted)] hover:text-[var(--ptxt)]'

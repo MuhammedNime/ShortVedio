@@ -1,4 +1,19 @@
+import { getApp, getApps, initializeApp } from 'firebase/app';
+import {
+  GoogleAuthProvider,
+  User,
+  getAuth,
+  onAuthStateChanged,
+  signInWithPopup,
+  signOut,
+} from 'firebase/auth';
+import firebaseConfig from '../../firebase-applet-config.json';
 import { isAndroidNativeApp } from '../utils/nativeDownload';
+
+export const SCOPES = [
+  'https://www.googleapis.com/auth/youtube.upload',
+  'https://www.googleapis.com/auth/youtube.force-ssl',
+] as const;
 
 export interface YouTubeChannelInfo {
   id: string;
@@ -34,200 +49,191 @@ export interface YouTubeUploadResult {
   playlistAdded: boolean;
 }
 
+export interface YouTubeSessionState {
+  connected: boolean;
+  token: string | null;
+  channel: YouTubeChannelInfo | null;
+  email: string | null;
+}
+
 export interface YouTubeOAuthStatus {
   configured: boolean;
   hasClientId: boolean;
   callbackUrl: string;
   requiresBackendUrl?: boolean;
+  isNativeWebView?: boolean;
 }
 
-const ENV_MAP = (import.meta as unknown as { env?: Record<string, string | undefined> }).env ?? {};
-const BUILD_API_BASE = (ENV_MAP.VITE_API_BASE_URL || '').trim().replace(/\/$/, '');
-const CLIENT_GOOGLE_ID = (ENV_MAP.VITE_GOOGLE_CLIENT_ID || '').trim();
+const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
+const auth = getAuth(app);
 
-function isStaticPagesRuntime(): boolean {
-  if (typeof window === 'undefined') return false;
-  const host = window.location.hostname.toLowerCase();
-  return host.endsWith('.github.io') || host === 'github.io';
-}
-
-function isServerlessStandaloneRuntime(): boolean {
-  return (isAndroidNativeApp() || isStaticPagesRuntime()) && !BUILD_API_BASE;
+function buildGoogleProvider(): GoogleAuthProvider {
+  const provider = new GoogleAuthProvider();
+  for (const scope of SCOPES) {
+    provider.addScope(scope);
+  }
+  // Always let the user pick or switch between any Google / YouTube account
+  provider.setCustomParameters({ prompt: 'select_account' });
+  return provider;
 }
 
 // Strictly in-memory OAuth access token cache (never stored in localStorage/sessionStorage)
+let isSigningIn = false;
 let memoryAccessToken: string | null = null;
 let memoryTokenExpiresAt = 0;
 let memoryChannel: YouTubeChannelInfo | null = null;
+let memoryEmail: string | null = null;
 
-function buildBackendUrl(path: string): string {
-  return BUILD_API_BASE ? `${BUILD_API_BASE}${path}` : path;
+type SessionListener = (session: YouTubeSessionState) => void;
+const sessionListeners = new Set<SessionListener>();
+let authListenerUnsubscribe: (() => void) | null = null;
+
+function clearMemorySession(): void {
+  memoryAccessToken = null;
+  memoryTokenExpiresAt = 0;
+  memoryChannel = null;
+  memoryEmail = null;
 }
 
-export function getCachedYouTubeSession(): {
-  connected: boolean;
-  token: string | null;
-  channel: YouTubeChannelInfo | null;
-} {
+function notifySessionListeners(): void {
+  const snapshot = getCachedYouTubeSession();
+  sessionListeners.forEach((listener) => {
+    try {
+      listener(snapshot);
+    } catch {
+      // ignore subscriber errors
+    }
+  });
+}
+
+function ensureAuthStateSubscription(): void {
+  if (authListenerUnsubscribe) return;
+  authListenerUnsubscribe = onAuthStateChanged(auth, (user: User | null) => {
+    if (user) {
+      memoryEmail = user.email || memoryEmail;
+      if (memoryAccessToken && Date.now() < memoryTokenExpiresAt - 15_000) {
+        notifySessionListeners();
+      } else if (!isSigningIn) {
+        memoryAccessToken = null;
+        memoryTokenExpiresAt = 0;
+        memoryChannel = null;
+        notifySessionListeners();
+      }
+    } else {
+      clearMemorySession();
+      notifySessionListeners();
+    }
+  });
+}
+
+export function initYouTubeAuthListener(onChange: SessionListener): () => void {
+  ensureAuthStateSubscription();
+  sessionListeners.add(onChange);
+  onChange(getCachedYouTubeSession());
+  return () => {
+    sessionListeners.delete(onChange);
+  };
+}
+
+export function getCachedYouTubeSession(): YouTubeSessionState {
   if (!memoryAccessToken || Date.now() >= memoryTokenExpiresAt - 15_000) {
-    return { connected: false, token: null, channel: null };
+    return { connected: false, token: null, channel: null, email: memoryEmail };
   }
   return {
     connected: true,
     token: memoryAccessToken,
     channel: memoryChannel,
+    email: memoryEmail,
   };
 }
 
-export function disconnectYouTubeSession(): void {
-  memoryAccessToken = null;
-  memoryTokenExpiresAt = 0;
-  memoryChannel = null;
+export async function disconnectYouTubeSession(): Promise<void> {
+  clearMemorySession();
+  notifySessionListeners();
+  try {
+    await signOut(auth);
+  } catch {
+    // ignore signOut errors after local cache is cleared
+  }
 }
 
 export async function checkYouTubeOAuthStatus(): Promise<YouTubeOAuthStatus> {
-  const origin = typeof window !== 'undefined' ? window.location.origin : '';
-  const fallbackCallback = origin ? `${origin}/auth/youtube/callback` : '/auth/youtube/callback';
-
-  if (isServerlessStandaloneRuntime()) {
-    return {
-      configured: false,
-      hasClientId: Boolean(CLIENT_GOOGLE_ID),
-      callbackUrl: fallbackCallback,
-      requiresBackendUrl: true,
-    };
-  }
-
-  try {
-    const res = await fetch(
-      buildBackendUrl(`/api/youtube/status?origin=${encodeURIComponent(origin)}`),
-      { credentials: BUILD_API_BASE ? 'omit' : 'same-origin' }
-    );
-    if (!res.ok) {
-      return {
-        configured: false,
-        hasClientId: Boolean(CLIENT_GOOGLE_ID),
-        callbackUrl: fallbackCallback,
-      };
-    }
-    const data = (await res.json()) as Partial<YouTubeOAuthStatus>;
-    return {
-      configured: Boolean(data.configured),
-      hasClientId: Boolean(data.hasClientId || CLIENT_GOOGLE_ID),
-      callbackUrl: data.callbackUrl || fallbackCallback,
-    };
-  } catch {
-    return {
-      configured: false,
-      hasClientId: Boolean(CLIENT_GOOGLE_ID),
-      callbackUrl: fallbackCallback,
-    };
-  }
+  const hasConfig = Boolean(firebaseConfig?.apiKey && firebaseConfig?.authDomain);
+  return {
+    configured: hasConfig,
+    hasClientId: Boolean(firebaseConfig?.oAuthClientId),
+    callbackUrl: '',
+    requiresBackendUrl: false,
+    isNativeWebView: isAndroidNativeApp(),
+  };
 }
 
-export async function getYouTubeAuthUrl(): Promise<{ url: string; redirectUri: string }> {
-  if (isServerlessStandaloneRuntime()) {
-    throw new Error(
-      'الرفع المباشر عبر OAuth يتطلب وجود خادم خلفي (VITE_API_BASE_URL). داخل APK يمكنك استخدام زر «مشاركة / حفظ» لإرسال الفيديو لتطبيق YouTube ولصق حزمة النشر.'
-    );
+function mapFirebaseAuthError(err: unknown): string {
+  const code =
+    typeof err === 'object' && err !== null && 'code' in err
+      ? String((err as { code?: unknown }).code || '')
+      : '';
+
+  if (code === 'auth/popup-blocked') {
+    return 'قام المتصفح بحظر نافذة تسجيل الدخول. اسمح بالنوافذ المنبثقة لهذا الموقع ثم أعد المحاولة.';
   }
-  const origin = typeof window !== 'undefined' ? window.location.origin : '';
-  const res = await fetch(
-    buildBackendUrl(`/api/youtube/auth-url?origin=${encodeURIComponent(origin)}`),
-    { credentials: BUILD_API_BASE ? 'omit' : 'same-origin' }
-  );
-  const data = (await res.json()) as {
-    url?: string;
-    redirectUri?: string;
-    error?: string;
-    callbackUrl?: string;
-  };
-  if (!res.ok || !data.url) {
-    throw new Error(data.error || 'تعذر تجهيز رابط تفويض YouTube.');
+  if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
+    return 'تم إغلاق نافذة تسجيل الدخول قبل إتمام اختيار الحساب.';
   }
-  return {
-    url: data.url,
-    redirectUri: data.redirectUri || `${origin}/auth/youtube/callback`,
-  };
+  if (code === 'auth/unauthorized-domain') {
+    return 'النطاق الحالي غير مصرح به في Firebase Auth. افتح التطبيق من رابط الويب الرسمي لإتمام ربط Google.';
+  }
+  if (code === 'auth/operation-not-supported-in-this-environment') {
+    return isAndroidNativeApp()
+      ? 'تسجيل الدخول عبر النافذة المنبثقة غير مدعوم داخل عارض الويب في APK؛ يمكنك نسخ حزمة النشر الجاهزة واستخدام زر «مشاركة / حفظ» لإرسال الفيديو لتطبيق يوتيوب مباشرة.'
+      : 'المتصفح الحالي لا يدعم النوافذ المنبثقة لتسجيل الدخول.';
+  }
+  if (code === 'auth/network-request-failed') {
+    return 'تعذر الاتصال بخوادم Google. تحقق من اتصال الإنترنت وأعد المحاولة.';
+  }
+  if (err instanceof Error && err.message.trim()) {
+    return err.message;
+  }
+  return 'تعذر إتمام تسجيل الدخول بحساب Google.';
 }
 
 export async function connectYouTubeWithPopup(): Promise<{
   accessToken: string;
   channel: YouTubeChannelInfo | null;
+  email: string | null;
 }> {
-  const { url } = await getYouTubeAuthUrl();
-
-  return await new Promise((resolve, reject) => {
-    const popup = window.open(url, 'youtube_oauth_popup', 'width=540,height=700');
-    if (!popup) {
-      reject(
-        new Error('قام المتصفح بحظر النافذة المنبثقة. اسمح بالنوافذ المنبثقة ثم أعد المحاولة.')
-      );
-      return;
+  ensureAuthStateSubscription();
+  isSigningIn = true;
+  try {
+    const provider = buildGoogleProvider();
+    const result = await signInWithPopup(auth, provider);
+    const credential = GoogleAuthProvider.credentialFromResult(result);
+    if (!credential?.accessToken) {
+      throw new Error('لم يتم الحصول على رمز صلاحية YouTube من Google. يرجى الموافقة على صلاحيات يوتيوب والمحاولة مرة أخرى.');
     }
 
-    let settled = false;
-    const cleanup = () => {
-      window.removeEventListener('message', onMessage);
-      window.clearInterval(pollTimer);
-      window.clearTimeout(timeoutTimer);
+    memoryAccessToken = credential.accessToken;
+    memoryTokenExpiresAt = Date.now() + 3400 * 1000;
+    memoryEmail = result.user.email || null;
+    memoryChannel = null;
+
+    try {
+      memoryChannel = await fetchYouTubeChannel(credential.accessToken);
+    } catch {
+      memoryChannel = null;
+    }
+
+    notifySessionListeners();
+    return {
+      accessToken: credential.accessToken,
+      channel: memoryChannel,
+      email: memoryEmail,
     };
-
-    const onMessage = async (event: MessageEvent) => {
-      if (!event.data || typeof event.data !== 'object') return;
-      const payload = event.data as {
-        type?: string;
-        accessToken?: string;
-        expiresIn?: number;
-        channel?: YouTubeChannelInfo | null;
-        error?: string;
-      };
-
-      if (payload.type === 'YOUTUBE_OAUTH_ERROR') {
-        settled = true;
-        cleanup();
-        reject(new Error(payload.error || 'تعذر ربط قناة YouTube.'));
-        return;
-      }
-
-      if (payload.type === 'YOUTUBE_OAUTH_SUCCESS' && payload.accessToken) {
-        settled = true;
-        cleanup();
-        memoryAccessToken = payload.accessToken;
-        memoryTokenExpiresAt = Date.now() + (payload.expiresIn || 3500) * 1000;
-        memoryChannel = payload.channel ?? null;
-        if (!memoryChannel) {
-          try {
-            memoryChannel = await fetchYouTubeChannel(payload.accessToken);
-          } catch {
-            // optional
-          }
-        }
-        resolve({
-          accessToken: payload.accessToken,
-          channel: memoryChannel,
-        });
-      }
-    };
-
-    const pollTimer = window.setInterval(() => {
-      if (popup.closed && !settled) {
-        settled = true;
-        cleanup();
-        reject(new Error('تم إغلاق نافذة تسجيل الدخول قبل إتمام الربط.'));
-      }
-    }, 500);
-
-    const timeoutTimer = window.setTimeout(() => {
-      if (!settled) {
-        settled = true;
-        cleanup();
-        reject(new Error('انتهت مهلة انتظار تسجيل الدخول.'));
-      }
-    }, 180_000);
-
-    window.addEventListener('message', onMessage);
-  });
+  } catch (err) {
+    throw new Error(mapFirebaseAuthError(err));
+  } finally {
+    isSigningIn = false;
+  }
 }
 
 export async function fetchYouTubeChannel(accessToken: string): Promise<YouTubeChannelInfo | null> {
@@ -283,7 +289,7 @@ export async function uploadVideoToYouTube(
 ): Promise<YouTubeUploadResult> {
   const session = getCachedYouTubeSession();
   if (!session.connected || !session.token) {
-    throw new Error('انتهت جلسة تسجيل الدخول. أعد ربط قناة YouTube أولاً.');
+    throw new Error('انتهت جلسة تسجيل الدخول. أعد ربط حساب Google / YouTube أولاً.');
   }
   const accessToken = session.token;
   const {
@@ -337,6 +343,11 @@ export async function uploadVideoToYouTube(
   );
 
   if (!initRes.ok) {
+    if (initRes.status === 401) {
+      clearMemorySession();
+      notifySessionListeners();
+      throw new Error('انتهت صلاحية جلسة Google. أعد تسجيل الدخول بالضغط على زر ربط الحساب.');
+    }
     const errText = await initRes.text();
     let parsedMsg = 'تعذر بدء رفع الفيديو إلى YouTube.';
     try {

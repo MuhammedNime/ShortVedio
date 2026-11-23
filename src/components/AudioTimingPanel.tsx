@@ -323,6 +323,81 @@ export const AudioTimingPanel: React.FC<AudioTimingPanelProps> = ({
           </button>
         </div>
 
+        {/* 1-Click Retention & Speed Presets */}
+        <div className="flex flex-col gap-1.5">
+          <span className="text-[11px] text-[var(--pmuted)]">
+            أوضاع التوقيت الجاهزة (ضغطة واحدة):
+          </span>
+          <div className="grid grid-cols-3 gap-1.5">
+            {[
+              {
+                id: 'fastShorts',
+                label: 'شورتس سريع ⚡',
+                sub: '3.5ث عداد · مشاهدات عالية',
+                values: {
+                  introHold: 0,
+                  questionReadDelay: 0.7,
+                  optionStaggerDelay: 0.25,
+                  thinkingDuration: 3.5,
+                  suspenseDuration: 0.8,
+                  revealHoldDuration: 2.0,
+                  transitionGap: 0.2,
+                },
+              },
+              {
+                id: 'balanced',
+                label: 'متوازن ⚖️',
+                sub: '5ث عداد · قياسي',
+                values: {
+                  introHold: DEFAULT_TIMING.introHold,
+                  questionReadDelay: DEFAULT_TIMING.questionReadDelay,
+                  optionStaggerDelay: DEFAULT_TIMING.optionStaggerDelay,
+                  thinkingDuration: DEFAULT_TIMING.thinkingDuration,
+                  suspenseDuration: DEFAULT_TIMING.suspenseDuration,
+                  revealHoldDuration: DEFAULT_TIMING.revealHoldDuration,
+                  transitionGap: DEFAULT_TIMING.transitionGap,
+                },
+              },
+              {
+                id: 'deepChallenge',
+                label: 'تحدي عميق 🧮',
+                sub: '8ث عداد · رياضيات/ألغاز',
+                values: {
+                  introHold: 0.2,
+                  questionReadDelay: 1.4,
+                  optionStaggerDelay: 0.45,
+                  thinkingDuration: 8.0,
+                  suspenseDuration: 1.2,
+                  revealHoldDuration: 3.25,
+                  transitionGap: 0.4,
+                },
+              },
+            ].map((preset) => {
+              const isSelected =
+                Math.abs((timing.thinkingDuration ?? 0) - preset.values.thinkingDuration) < 0.05 &&
+                Math.abs((timing.suspenseDuration ?? 0) - preset.values.suspenseDuration) < 0.05 &&
+                Math.abs((timing.revealHoldDuration ?? 0) - preset.values.revealHoldDuration) < 0.05;
+              return (
+                <button
+                  key={preset.id}
+                  type="button"
+                  onClick={() => patchTiming(preset.values)}
+                  className={`flex flex-col items-center justify-center gap-0.5 px-2 py-2 rounded-lg border text-center transition-colors cursor-pointer ${
+                    isSelected
+                      ? 'bg-[#00B050]/15 border-[#00B050] text-[#00B050] dark:text-[#6ee7b7]'
+                      : 'bg-[var(--surface)] border-[var(--pline)] hover:border-[var(--gold)] text-[var(--ptxt)]'
+                  }`}
+                >
+                  <span className="text-[11px] font-bold whitespace-nowrap">{preset.label}</span>
+                  <span className="text-[9.5px] text-[var(--pmuted)] leading-tight">
+                    {preset.sub}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
         <div className="flex flex-col gap-3">
           {[
             {

@@ -57,7 +57,7 @@ export type BackgroundMotion = 'none' | 'slowZoom' | 'particles' | 'zoomAndParti
 
 export type PrizeLadderStyle = 'topStrip' | 'sideColumn';
 
-export type SlideType = 'multiple' | 'trueFalse';
+export type SlideType = 'multiple' | 'trueFalse' | 'clues' | 'versus';
 export type SlideDifficulty = 'none' | 'easy' | 'medium' | 'hard';
 
 export type OptionsAppearMode = 'stagger' | 'allAtOnce' | 'rowByRow';
@@ -1425,7 +1425,12 @@ export function computeSlideSchedule(
   const globalOptDur =
     optSlot?.sourceType === 'custom' && optSlot.customDataUrl ? optSlot.duration ?? 0 : 0;
 
-  const optionCount = slide?.slideType === 'trueFalse' ? 2 : 4;
+  const optionCount =
+    slide?.slideType === 'trueFalse' || slide?.slideType === 'versus'
+      ? 2
+      : slide?.slideType === 'clues'
+        ? 3
+        : 4;
   const appearMode = template?.optionsAppearMode || 'stagger';
   const defaultStagger = Math.max(0.15, timing?.optionStaggerDelay ?? 0.45);
   const tOptions: number[] = [tOpt0];

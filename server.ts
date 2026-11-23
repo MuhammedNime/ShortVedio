@@ -214,7 +214,7 @@ async function startServer() {
         topic?: string;
         count?: number;
         difficulty?: string;
-        contentType?: 'general' | 'math' | 'trueFalse';
+        contentType?: 'general' | 'math' | 'trueFalse' | 'clues' | 'versus';
       };
 
       const cleanTopic = (topic ?? '').trim();
@@ -226,8 +226,12 @@ async function startServer() {
       const safeCount = Math.max(1, Math.min(12, Math.round(Number(count) || 3)));
       const diffLabel = difficulty && difficulty.trim() ? difficulty.trim() : 'متنوع';
       const isTrueFalse = contentType === 'trueFalse';
+      const isClues = contentType === 'clues';
+      const isVersus = contentType === 'versus';
       const isMath =
         !isTrueFalse &&
+        !isClues &&
+        !isVersus &&
         (contentType === 'math' ||
           /رياضيات|جبر|معادل|كسر|كسور|جذر|جذور|حساب|هندسة|مثلث|مشتق|تكامل/i.test(cleanTopic));
 
@@ -250,7 +254,35 @@ async function startServer() {
 - options: مصفوفة تحتوي خيارين بالضبط هما ["صح", "خطأ"]
 - correctIndex: 0 إذا كانت العبارة صحيحة، أو 1 إذا كانت خاطئة (نوّع بين 0 و 1)
 - explanationText: تصحيح أو توضيح قصير جداً (أقل من 12 كلمة)`
-        : `الموضوع أو الفكرة المطلوبة: "${cleanTopic}"
+        : isClues
+          ? `الموضوع أو الفكرة المطلوبة: "${cleanTopic}"
+عدد الألغاز المطلوبة: ${safeCount}
+مستوى الصعوبة: ${diffLabel}
+
+أنشئ ${safeCount} لغزاً بنمط (3 تلميحات / من أنا؟) باللغة العربية الفصحى المشوقة والمناسبة لفيديوهات يوتيوب شورتس.
+أرجع مصفوفة JSON فقط (JSON Array) بدون أي نص إضافي خارج JSON، بحيث يحتوي كل عنصر على:
+- badgeText: عنوان قصير للشارة العلوية (مثال: 3 تلميحات · لغز 1)
+- question: سؤال قصير ومشوق (مثال: من أنا؟ أو ما هي هذه الدولة؟ أو من هذا العالم؟ - أقل من 10 كلمات)
+- options: مصفوفة من 4 عناصر نصية بالضبط بهذا الترتيب:
+  * العنصر [0]: التلميح الأول (غريب أو غير مباشر وقصير، أقل من 10 كلمات)
+  * العنصر [1]: التلميح الثاني (أقرب قليلاً للحل وقصير، أقل من 10 كلمات)
+  * العنصر [2]: التلميح الثالث (تلميح واضح يكاد يكشف الحل، أقل من 10 كلمات)
+  * العنصر [3]: الإجابة الصحيحة النهائية (كلمة أو كلمتان فقط، بدون شرح)
+- correctIndex: دائماً الرقم 3
+- explanationText: حقيقة سريعة ومدهشة عن الإجابة (أقل من 12 كلمة)`
+          : isVersus
+            ? `الموضوع أو الفكرة المطلوبة: "${cleanTopic}"
+عدد المقارنات المطلوبة: ${safeCount}
+مستوى الصعوبة: ${diffLabel}
+
+أنشئ ${safeCount} تحدياً بنمط (مقارنة VS بين طرفين) باللغة العربية الفصحى السلسة والمناسبة لفيديوهات الشورتس.
+أرجع مصفوفة JSON فقط (JSON Array) بدون أي نص إضافي خارج JSON، بحيث يحتوي كل عنصر على:
+- badgeText: عنوان قصير للشارة العلوية (مثال: مقارنة VS · تحدي 1)
+- question: سؤال مقارنة قصير ومباشر (مثال: أيهما أكبر مساحة؟ أو أيهما أسرع؟ أو أيهما أقدم تاريخياً؟ - أقل من 12 كلمة)
+- options: مصفوفة تحتوي اسمَي الطرفين المتنافسين بالضبط (اسمان قصيران واضحان، مثل ["المشتري", "زحل"])
+- correctIndex: 0 إذا كان الطرف الأول هو الصحيح/الأكبر/الأسرع، أو 1 إذا كان الطرف الثاني (نوّع بين 0 و 1)
+- explanationText: معلومة رقمية أو سبب سريع للفوز (أقل من 12 كلمة)`
+            : `الموضوع أو الفكرة المطلوبة: "${cleanTopic}"
 عدد الأسئلة المطلوبة: ${safeCount}
 مستوى الصعوبة: ${diffLabel}
 ${mathGuidelines}
@@ -267,42 +299,42 @@ ${mathGuidelines}
         ai.models.generateContent({
           model: 'gemini-3.1-flash-lite',
           contents: promptText,
-        config: {
-          thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
-          systemInstruction:
-            'أنت خبير في إعداد أسئلة المسابقات والرياضيات لفيديوهات يوتيوب باللغة العربية. التزم بالدقة العلمية والرياضية، الاختصار الواضح، وتنويع موضع الإجابة الصحيحة بين 0 و 3.',
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                badgeText: {
-                  type: Type.STRING,
-                  description: 'عنوان قصير للشارة العلوية مثل: تحدي المعلومات · سؤال 1',
+          config: {
+            thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
+            systemInstruction:
+              'أنت خبير في إعداد أسئلة المسابقات والتحديات والرياضيات لفيديوهات يوتيوب باللغة العربية. التزم بالدقة العلمية والرياضية، الاختصار الواضح، وتنويع موضع الإجابة الصحيحة.',
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  badgeText: {
+                    type: Type.STRING,
+                    description: 'عنوان قصير للشارة العلوية مثل: تحدي المعلومات · سؤال 1',
+                  },
+                  question: {
+                    type: Type.STRING,
+                    description: 'نص السؤال باللغة العربية واضح ومختصر',
+                  },
+                  options: {
+                    type: Type.ARRAY,
+                    items: { type: Type.STRING },
+                    description: 'مصفوفة الخيارات أو التلميحات أو طرفي المقارنة',
+                  },
+                  correctIndex: {
+                    type: Type.INTEGER,
+                    description: 'رقم فهرس الإجابة الصحيحة',
+                  },
+                  explanationText: {
+                    type: Type.STRING,
+                    description: 'توضيح مختصر جداً للإجابة الصحيحة',
+                  },
                 },
-                question: {
-                  type: Type.STRING,
-                  description: 'نص السؤال باللغة العربية واضح ومختصر',
-                },
-                options: {
-                  type: Type.ARRAY,
-                  items: { type: Type.STRING },
-                  description: 'أربعة خيارات بالضبط',
-                },
-                correctIndex: {
-                  type: Type.INTEGER,
-                  description: 'رقم فهرس الإجابة الصحيحة من 0 إلى 3',
-                },
-                explanationText: {
-                  type: Type.STRING,
-                  description: 'توضيح مختصر جداً للإجابة الصحيحة',
-                },
+                required: ['badgeText', 'question', 'options', 'correctIndex', 'explanationText'],
               },
-              required: ['badgeText', 'question', 'options', 'correctIndex', 'explanationText'],
             },
           },
-        },
         })
       );
 
@@ -319,13 +351,14 @@ ${mathGuidelines}
         explanationText?: string;
       }>;
 
+      const minOpts = isTrueFalse || isVersus ? 2 : 4;
       const normalized = parsed
         .filter(
           (item) =>
             item &&
             item.question &&
             Array.isArray(item.options) &&
-            item.options.length >= (isTrueFalse ? 2 : 4)
+            item.options.length >= minOpts
         )
         .slice(0, safeCount)
         .map((item, idx) => {
@@ -341,6 +374,40 @@ ${mathGuidelines}
               question: item.question!.trim(),
               options: [o0, o1, '', ''] as [string, string, string, string],
               correctIndex: cIdx,
+              explanationText: (item.explanationText ?? '').trim(),
+            };
+          }
+
+          if (isVersus) {
+            const rawIdx = Number(item.correctIndex);
+            const cIdx = (rawIdx === 1 ? 1 : 0) as 0 | 1;
+            const o0 = String(item.options?.[0] ?? 'الطرف الأول').trim() || 'الطرف الأول';
+            const o1 = String(item.options?.[1] ?? 'الطرف الثاني').trim() || 'الطرف الثاني';
+            return {
+              id: `ai-slide-${Date.now()}-${idx}`,
+              slideType: 'versus' as const,
+              badgeText: (item.badgeText ?? `مقارنة VS · ${idx + 1}`).trim(),
+              question: item.question!.trim(),
+              options: [o0, o1, '', ''] as [string, string, string, string],
+              correctIndex: cIdx,
+              explanationText: (item.explanationText ?? '').trim(),
+            };
+          }
+
+          if (isClues) {
+            const opts = item.options!.slice(0, 4).map((o) => String(o).trim()) as [
+              string,
+              string,
+              string,
+              string
+            ];
+            return {
+              id: `ai-slide-${Date.now()}-${idx}`,
+              slideType: 'clues' as const,
+              badgeText: (item.badgeText ?? `3 تلميحات · ${idx + 1}`).trim(),
+              question: item.question!.trim(),
+              options: opts,
+              correctIndex: 3 as const,
               explanationText: (item.explanationText ?? '').trim(),
             };
           }

@@ -118,7 +118,12 @@ export function collectSoundEventsInInterval(
     const tThink = base + sched.tThinkingStart;
     const tSus = base + sched.tSuspenseStart;
     const tReveal = base + sched.tRevealStart;
-    const optCount = slide?.slideType === 'trueFalse' ? 2 : 4;
+    const optCount =
+      slide?.slideType === 'trueFalse' || slide?.slideType === 'versus'
+        ? 2
+        : slide?.slideType === 'clues'
+          ? 3
+          : 4;
     const hasAnyOptVoice = Array.from({ length: optCount }).some((_, oi) =>
       Boolean(slide?.voiceover?.options?.[oi]?.dataUrl)
     );
@@ -1952,6 +1957,9 @@ export function computeStageLayerLayout(
   const fontStack = `'${template.fontFamily}', 'Cairo', 'Tajawal', sans-serif`;
   const isChannelLayout = template.optionsLayout === 'channel2x2';
   const isTrueFalse = slide.slideType === 'trueFalse';
+  const isVersus = slide.slideType === 'versus';
+  const isClues = slide.slideType === 'clues';
+  const isTwoOptionSideBySide = isTrueFalse || isVersus;
   const boxStyle: BoxShapeStyle = template.boxStyle || 'flat';
   const borderStyle: BoxBorderStyle = template.borderStyle || 'solid';
   const timerScale = Math.max(0.5, Math.min(1.8, template.timerScale ?? 1));
@@ -2224,9 +2232,10 @@ export function computeStageLayerLayout(
   let resolvedQCenterY = isFreeLayout ? desiredQCenterY : Math.max(minQCenterY, desiredQCenterY);
 
   // === Layer 5 & 6: Options + Timer + Explanation Sizing ===
-  const optionCount = isTrueFalse ? 2 : 4;
-  const is2x2Layout = template.optionsLayout === 'channel2x2' || template.optionsLayout === 'grid2x2';
-  const rowsCount = !is2x2Layout ? (isTrueFalse ? 2 : 4) : isTrueFalse ? 1 : 2;
+  const optionCount = isTwoOptionSideBySide ? 2 : isClues ? 3 : 4;
+  const is2x2Layout =
+    !isClues && (template.optionsLayout === 'channel2x2' || template.optionsLayout === 'grid2x2');
+  const rowsCount = isClues ? 3 : !is2x2Layout ? (isTwoOptionSideBySide ? 2 : 4) : isTwoOptionSideBySide ? 1 : 2;
   const userOptAreaW = (Math.max(35, Math.min(100, template.optionsWidth ?? 94)) / 100) * W;
   const maxStageOptW = isWide && !isFreeLayout ? wideAvailW : W - 24 - optSide * 2;
   let totalOptionsW = isWide && !isFreeLayout ? Math.min(wideAvailW, userOptAreaW) : Math.min(maxStageOptW, userOptAreaW);
@@ -2236,16 +2245,18 @@ export function computeStageLayerLayout(
       ? !is2x2Layout
         ? Math.min(112, Math.max(72, Math.round(template.optionHeight * 0.72)))
         : Math.min(156, Math.max(92, template.optionHeight))
-      : template.optionHeight;
+      : isClues && !isWide
+        ? Math.min(136, Math.max(108, template.optionHeight))
+        : template.optionHeight;
   let effectiveOptH =
-    isTrueFalse && is2x2Layout && !isFreeLayout
-      ? Math.max(baseOptH, isWide ? 156 : 178)
+    isTwoOptionSideBySide && is2x2Layout && !isFreeLayout
+      ? Math.max(baseOptH, isWide ? 168 : isVersus ? 210 : 178)
       : baseOptH;
 
   const userGap = Math.max(0, template.optionsGap ?? 26);
   const customColGap = template.optionsColGap ?? 0;
   const minVisualRowGap = optTop + optBottom + 4;
-  const minVisualColGap = optSide * 2 + 6;
+  const minVisualColGap = optSide * 2 + (isVersus && is2x2Layout ? 82 : 6);
   let effectiveRowGap = isFreeLayout
     ? userGap
     : Math.max(minVisualRowGap, isWide ? Math.min(40, Math.max(14, userGap)) : userGap);
@@ -2292,7 +2303,7 @@ export function computeStageLayerLayout(
     timerPlacement === 'centerOfOptions' &&
     !is2x2Layout &&
     optionCount >= 2;
-  const verticalSplitIdx = isTrueFalse ? 0 : 1;
+  const verticalSplitIdx = isTwoOptionSideBySide || isClues ? 0 : 1;
 
   if (hasTimerEnabled && timerPlacement === 'centerOfOptions') {
     if (!is2x2Layout) {
@@ -2317,7 +2328,7 @@ export function computeStageLayerLayout(
         ? Math.min(Math.max(40, totalOptionsW - 2 * 140), Math.max(customColGap > 0 ? customColGap : userGap, reqGap))
         : Math.min(Math.max(40, totalOptionsW - 2 * 145), Math.max(effectiveColGap, reqGap));
 
-      if (!isTrueFalse) {
+      if (!isTwoOptionSideBySide) {
         effectiveRowGap = Math.max(
           effectiveRowGap,
           timerBoxH + optTop + optBottom + 18 + extraCenterSpread * 0.4
@@ -2585,9 +2596,12 @@ export function computeStageLayerLayout(
       }
 
       if (is2x2Layout) {
-        if (isTrueFalse) {
+        if (isTwoOptionSideBySide) {
           const tfW = Math.min(totalOptionsW, Math.round(W * 0.94));
-          const tfGap = Math.max(customColGap > 0 || isFreeLayout ? 0 : minVisualColGap, effectiveColGap);
+          const tfGap = Math.max(
+            customColGap > 0 || isFreeLayout ? 0 : minVisualColGap,
+            effectiveColGap
+          );
           boxW = (tfW - tfGap) / 2;
           const areaLeft = optionsAreaCenterX - tfW / 2;
           const isRightCol = rtlCols ? i === 0 : i === 1;
@@ -2690,7 +2704,7 @@ export function computeStageLayerLayout(
         const topGroupEnd =
           optionsStartPx + topGroupRows * effectiveOptH + (topGroupRows - 1) * effectiveRowGap;
         resolvedTimerCenterY = topGroupEnd + verticalCenterGap / 2;
-      } else if (isTrueFalse) {
+      } else if (isTwoOptionSideBySide) {
         resolvedTimerCenterY = optionsStartPx + effectiveOptH / 2;
       } else {
         resolvedTimerCenterY = optionsStartPx + effectiveOptH + effectiveRowGap / 2;
@@ -3018,41 +3032,72 @@ export function renderQuizFrame(
   if (template.showEndCard && slides.length > 0 && globalTime >= contentEnd) {
     const endElapsed = globalTime - contentEnd;
     const alpha = clamp01(endElapsed / 0.35);
+    const popScale = 0.92 + 0.08 * easeOutCubic(alpha);
 
     ctx.save();
-    ctx.fillStyle = `rgba(0, 0, 0, ${0.84 * alpha})`;
+    ctx.fillStyle = `rgba(0, 0, 0, ${0.78 * alpha})`;
     ctx.fillRect(0, 0, W, H);
 
-    const endText = (template.endCardText || 'شكراً لمشاهدتكم').trim();
+    ctx.save();
     ctx.globalAlpha = alpha;
-    ctx.font = `800 ${isWide ? 92 : 84}px ${fontStack}`;
+    ctx.translate(W / 2, H / 2);
+    ctx.scale(popScale, popScale);
+
+    const endCardW = isWide ? Math.min(W - 220, 1220) : Math.min(W - 96, 920);
+    const hasCta = Boolean(template.showEndSubscribeCta);
+    const endCardH = hasCta ? (isWide ? 470 : 540) : (isWide ? 340 : 380);
+
+    drawStyledBoxContainer(ctx, {
+      x: -endCardW / 2,
+      y: -endCardH / 2,
+      w: endCardW,
+      h: endCardH,
+      radius: 36,
+      fillColorHex: template.questionBoxColor,
+      fillRgba: hexToRgba(template.questionBoxColor, 0.92),
+      opacity: 0.92,
+      borderColor: template.questionBorderColor || '#D4A73A',
+      borderWidth: 4,
+      boxStyle,
+      borderStyle,
+      boxGloss: template.boxGloss,
+      enhanced: template.enhanceAppearance ?? true,
+      shadowIntensity: Math.min(1.2, shadowIntensity),
+      glowIntensity: Math.max(0.25, glowIntensity),
+    });
+
+    const endText = (template.endCardText || 'شكراً لمشاهدتكم').trim();
+    ctx.font = `900 ${isWide ? 80 : 72}px ${fontStack}`;
     ctx.direction = 'rtl';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
 
-    const lines = wrapArabicText(ctx, endText, W - 200);
-    const lineH = 112;
-    const hasCta = Boolean(template.showEndSubscribeCta);
-    const startY = (hasCta ? H * 0.44 : H / 2) - ((lines.length - 1) * lineH) / 2;
+    const lines = wrapArabicText(ctx, endText, endCardW - 100);
+    const lineH = 98;
+    const startY = (hasCta ? -70 : 0) - ((lines.length - 1) * lineH) / 2;
 
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.38)';
+    ctx.fillStyle = isColorDark(template.questionBoxColor) ? 'rgba(0,0,0,0.4)' : 'rgba(255,255,255,0.35)';
     lines.forEach((line, idx) => {
-      ctx.fillText(line, W / 2, startY + idx * lineH + 5);
+      ctx.fillText(line, 0, startY + idx * lineH + 3);
     });
-    ctx.fillStyle = '#FFFFFF';
+    ctx.fillStyle = template.questionTextColor || '#FFFFFF';
     lines.forEach((line, idx) => {
-      ctx.fillText(line, W / 2, startY + idx * lineH);
+      ctx.fillText(line, 0, startY + idx * lineH);
     });
 
     if (hasCta) {
-      const ctaY = startY + (lines.length - 1) * lineH + 145;
-      const ctaScale = 1 + 0.035 * Math.sin(endElapsed * 5);
-      const ctaW = isWide ? 660 : 700;
-      const ctaH = 78;
-      const ctaLabel =
-        (template.endCtaText || '').trim() || 'اشترك في القناة · اكتب نتيجتك في التعليقات';
+      const ctaY = startY + (lines.length - 1) * lineH + 135;
+      const ctaScale = 1 + 0.032 * Math.sin(endElapsed * 5);
+      const ctaW = Math.min(endCardW - 72, isWide ? 680 : 720);
+      const ctaH = 82;
+      const defaultScoreCta =
+        slides.length > 1
+          ? `كم إجابة صحيحة جبت من ${slides.length}؟ اكتب نتيجتك واشترك 👇`
+          : 'اشترك في القناة · اكتب إجابتك في التعليقات 👇';
+      const ctaLabel = (template.endCtaText || '').trim() || defaultScoreCta;
+
       ctx.save();
-      ctx.translate(W / 2, ctaY);
+      ctx.translate(0, ctaY);
       ctx.scale(ctaScale, ctaScale);
       drawRoundedRect(ctx, -ctaW / 2, -ctaH / 2, ctaW, ctaH, 24);
       ctx.fillStyle = '#DC2626';
@@ -3061,10 +3106,10 @@ export function renderQuizFrame(
       ctx.lineWidth = 3;
       ctx.stroke();
 
-      let ctaFont = isWide ? 32 : 34;
+      let ctaFont = isWide ? 31 : 32;
       ctx.direction = 'rtl';
       ctx.font = `800 ${ctaFont}px ${fontStack}`;
-      while (ctaFont > 20 && ctx.measureText(ctaLabel).width > ctaW - 44) {
+      while (ctaFont > 19 && ctx.measureText(ctaLabel).width > ctaW - 44) {
         ctaFont -= 2;
         ctx.font = `800 ${ctaFont}px ${fontStack}`;
       }
@@ -3075,6 +3120,7 @@ export function renderQuizFrame(
       ctx.restore();
     }
 
+    ctx.restore();
     ctx.restore();
 
     drawBrandWatermark(ctx, template, globalTime, W, H, fontStack);
@@ -3102,6 +3148,9 @@ export function renderQuizFrame(
   const animDuration = 0.35;
   const isChannelLayout = template.optionsLayout === 'channel2x2';
   const isTrueFalse = slide.slideType === 'trueFalse';
+  const isVersus = slide.slideType === 'versus';
+  const isClues = slide.slideType === 'clues';
+  const isTwoOptionSideBySide = isTrueFalse || isVersus;
   const enhanced = template.enhanceAppearance ?? true;
   const slideImg = getCachedImage(slide.imageDataUrl);
   const darkBg = isBackgroundDark(template);
@@ -3495,8 +3544,8 @@ export function renderQuizFrame(
     if (optProgress <= 0) continue;
 
     const tr = computeAnimTransform(optProgress, template.optionAnim);
-    const isCorrect = i === slide.correctIndex;
-    const isWrongRed = isRevealed && !isCorrect && isRedWrongMode;
+    const isCorrect = !isClues && i === slide.correctIndex;
+    const isWrongRed = !isClues && isRevealed && !isCorrect && isRedWrongMode;
 
     let optWindowEnd = tThinkingStart;
     for (let k = i + 1; k < optionCount; k++) {
@@ -3531,7 +3580,9 @@ export function renderQuizFrame(
     }
 
     if (isRevealed) {
-      if (isCorrect) {
+      if (isClues) {
+        finalAlpha *= 1 - 0.82 * clamp01(revealElapsed / 0.28);
+      } else if (isCorrect) {
         finalScale *= 1 + (isChannelLayout ? 0.06 : 0.05) * clamp01(revealAnim);
       } else if (template.revealStyle === 'dimOthers') {
         finalAlpha *= 1 - 0.7 * clamp01(revealElapsed / 0.28);
@@ -3568,7 +3619,11 @@ export function renderQuizFrame(
           ? '#FECACA'
           : isSpokenHighlight
             ? '#FFF3B0'
-            : template.optionBorderColor;
+            : isVersus
+              ? i === 0
+                ? '#F59E0B'
+                : '#38BDF8'
+              : template.optionBorderColor;
 
     const shouldDrawBody =
       template.optionBoxOpacity > 0.01 || (isRevealed && (isCorrect || isWrongRed));
@@ -3625,17 +3680,21 @@ export function renderQuizFrame(
         isHighlighted: isSpokenHighlight,
         shadowOffsetY: 8,
         drawFill: true,
-        drawBorder: template.optionBorderWidth > 0 || isSpokenHighlight || boxStyle === 'minimalOutline',
+        drawBorder: template.optionBorderWidth > 0 || isSpokenHighlight || isVersus || boxStyle === 'minimalOutline',
       });
     }
 
-    const labelStr = isTrueFalse
-      ? template.optionLabelStyle === 'none'
-        ? i === 0
-          ? '✓'
-          : '✗'
-        : getOptionBadgeLabel(i, template.optionLabelStyle)
-      : getOptionBadgeLabel(i, template.optionLabelStyle);
+    const labelStr = isClues
+      ? String(i + 1)
+      : isTrueFalse
+        ? template.optionLabelStyle === 'none'
+          ? i === 0
+            ? '✓'
+            : '✗'
+          : getOptionBadgeLabel(i, template.optionLabelStyle)
+        : isVersus && template.optionLabelStyle === 'none'
+          ? ''
+          : getOptionBadgeLabel(i, template.optionLabelStyle);
     const hasBadge = labelStr.length > 0;
     const badgeSize = Math.min(boxH - 26, 66);
     const isHexStyle = boxStyle === 'millionaireHex' || boxStyle === 'chamfer';
@@ -3680,10 +3739,10 @@ export function renderQuizFrame(
     const showCheck =
       isRevealed &&
       isCorrect &&
-      (template.revealStyle === 'scaleCheck' || isRedWrongMode || isTrueFalse) &&
-      (!isChannelLayout || isWide || isRedWrongMode || isTrueFalse);
+      (template.revealStyle === 'scaleCheck' || isRedWrongMode || isTwoOptionSideBySide) &&
+      (!isChannelLayout || isWide || isRedWrongMode || isTwoOptionSideBySide);
 
-    const showCross = isWrongRed && (!isChannelLayout || isTrueFalse);
+    const showCross = isWrongRed && (!isChannelLayout || isTwoOptionSideBySide);
 
     const iconReserve = showCheck || showCross ? (isHexStyle ? 86 : 76) : isHexStyle ? 36 : 22;
     const rightReserve = hasBadge ? badgeMarginRight + badgeSize + 24 : isHexStyle ? 36 : 22;
@@ -3722,7 +3781,17 @@ export function renderQuizFrame(
       ctx.stroke();
     }
 
-    const optText = slide.options[i] || (isTrueFalse ? (i === 0 ? 'صح' : 'خطأ') : `الخيار ${i + 1}`);
+    const optText =
+      slide.options[i] ||
+      (isTrueFalse
+        ? i === 0
+          ? 'صح'
+          : 'خطأ'
+        : isClues
+          ? `تلميح ${i + 1}`
+          : isVersus
+            ? `الطرف ${i + 1}`
+            : `الخيار ${i + 1}`);
     const optHasMath = hasMathSyntax(optText);
 
     let optFontSize = isWide
@@ -3735,6 +3804,10 @@ export function renderQuizFrame(
 
     if (isTrueFalse) {
       optFontSize = Math.round(optFontSize * 1.15);
+    } else if (isVersus) {
+      optFontSize = Math.round(optFontSize * (optText.length > 18 ? 0.94 : 1.08));
+    } else if (isClues) {
+      optFontSize = Math.round(optFontSize * (optText.length > 42 ? 0.8 : 0.92));
     } else if (isChannelLayout) {
       if (optText.length > 60) optFontSize = Math.round(optFontSize * 0.62);
       else if (optText.length > 35) optFontSize = Math.round(optFontSize * 0.78);
@@ -3761,7 +3834,7 @@ export function renderQuizFrame(
         2
       );
     } else {
-      ctx.font = `${isTrueFalse ? 800 : 700} ${optFontSize}px ${fontStack}`;
+      ctx.font = `${isTrueFalse || isVersus ? 800 : 700} ${optFontSize}px ${fontStack}`;
       ctx.direction = 'rtl';
       ctx.fillStyle = optColor;
 
@@ -3776,7 +3849,7 @@ export function renderQuizFrame(
             optLines.length * (optFontSize * 1.25) > availOptH)
         ) {
           optFontSize -= 2;
-          ctx.font = `${isTrueFalse ? 800 : 700} ${optFontSize}px ${fontStack}`;
+          ctx.font = `${isTrueFalse || isVersus ? 800 : 700} ${optFontSize}px ${fontStack}`;
           optLines = wrapArabicText(ctx, optText, safeTextMaxW);
         }
       }
@@ -3792,9 +3865,12 @@ export function renderQuizFrame(
             ? 'right'
             : alignMode === 'left'
               ? 'left'
-              : ((isChannelLayout || template.optionsLayout === 'grid2x2') && !hasBadge) || isTrueFalse
-                ? 'center'
-                : 'right';
+              : isClues
+                ? 'right'
+                : ((isChannelLayout || template.optionsLayout === 'grid2x2') && !hasBadge) ||
+                    isTwoOptionSideBySide
+                  ? 'center'
+                  : 'right';
 
       if (resolvedAlign === 'center') {
         ctx.textAlign = 'center';
@@ -3829,6 +3905,125 @@ export function renderQuizFrame(
       }
     }
 
+    ctx.restore();
+  }
+
+  // 5.2 Versus Mode Center "VS" Medallion
+  if (isVersus && layoutOptions.items.length >= 2) {
+    const opt2Prog = clamp01((localTime - tOptionStarts[1]) / animDuration);
+    if (opt2Prog > 0) {
+      const vsX = (layoutOptions.items[0].centerX + layoutOptions.items[1].centerX) / 2;
+      const vsY = (layoutOptions.items[0].centerY + layoutOptions.items[1].centerY) / 2;
+      const vsScale = easeOutBack(opt2Prog) * (isSuspending ? 1 + 0.06 * Math.abs(Math.sin(((localTime - tSuspenseStart) / 0.4) * Math.PI)) : 1);
+      ctx.save();
+      ctx.globalAlpha *= opt2Prog;
+      ctx.translate(vsX, vsY);
+      ctx.scale(vsScale, vsScale);
+      const vsRadius = isWide ? 38 : 42;
+      ctx.beginPath();
+      ctx.arc(0, 0, vsRadius + 5, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
+      ctx.fill();
+
+      const vsGrad = ctx.createLinearGradient(-vsRadius, -vsRadius, vsRadius, vsRadius);
+      vsGrad.addColorStop(0, '#F59E0B');
+      vsGrad.addColorStop(1, '#DC2626');
+      ctx.beginPath();
+      ctx.arc(0, 0, vsRadius, 0, Math.PI * 2);
+      ctx.fillStyle = vsGrad;
+      ctx.fill();
+      ctx.strokeStyle = '#FFFFFF';
+      ctx.lineWidth = 4;
+      ctx.stroke();
+
+      ctx.direction = 'ltr';
+      ctx.font = `900 ${isWide ? 30 : 32}px 'JetBrains Mono', ${fontStack}`;
+      ctx.fillStyle = '#FFFFFF';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('VS', 0, 2);
+      ctx.restore();
+    }
+  }
+
+  // 5.3 Clues Mode Final Answer Reveal Card (centered cleanly inside options area)
+  if (isClues && isRevealed) {
+    const cardPop = easeOutBack(clamp01(revealElapsed / 0.38));
+    const cardAlpha = clamp01(revealElapsed / 0.22);
+    const ansX = layoutOptions.areaCenterX;
+    const ansY = layoutOptions.startPx + layoutOptions.totalH / 2;
+    const ansW = Math.min(layoutOptions.totalW, isWide ? 980 : 920);
+    const ansH = Math.min(layoutOptions.totalH - 12, Math.max(175, isWide ? 190 : 230));
+    correctOriginX = ansX;
+    correctOriginY = ansY;
+
+    ctx.save();
+    ctx.globalAlpha *= cardAlpha;
+    ctx.translate(ansX, ansY);
+    ctx.scale(0.84 + 0.16 * cardPop, 0.84 + 0.16 * cardPop);
+
+    drawRoundedRect(ctx, -ansW / 2 - 8, -ansH / 2 - 8, ansW + 16, ansH + 16, 34);
+    ctx.fillStyle = hexToRgba(template.correctColor, 0.34);
+    ctx.fill();
+
+    drawStyledBoxContainer(ctx, {
+      x: -ansW / 2,
+      y: -ansH / 2,
+      w: ansW,
+      h: ansH,
+      radius: 28,
+      fillColorHex: template.correctColor,
+      fillRgba: hexToRgba(template.correctColor, 0.98),
+      opacity: 0.98,
+      borderColor: '#FFFFFF',
+      borderWidth: 5,
+      boxStyle,
+      borderStyle: 'solid',
+      boxGloss: true,
+      enhanced: true,
+      shadowIntensity: 1.1,
+      glowIntensity: 0.45,
+      drawFill: true,
+      drawBorder: true,
+    });
+
+    ctx.font = `800 ${isWide ? 28 : 30}px ${fontStack}`;
+    ctx.direction = 'rtl';
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.88)';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('✓ الإجابة الصحيحة', 0, -ansH * 0.25);
+
+    const clueAnswer = (slide.options[3] || slide.explanationText || 'الإجابة').trim();
+    if (hasMathSyntax(clueAnswer)) {
+      drawSmartQuizText(
+        ctx,
+        clueAnswer,
+        0,
+        ansH * 0.12,
+        ansW - 72,
+        isWide ? 52 : 58,
+        fontStack,
+        900,
+        '#FFFFFF',
+        2
+      );
+    } else {
+      let aFont = isWide ? 52 : 58;
+      ctx.font = `900 ${aFont}px ${fontStack}`;
+      let aLines = wrapArabicText(ctx, clueAnswer, ansW - 72);
+      while (aFont > 28 && (aLines.length > 2 || aLines.length * aFont * 1.25 > ansH * 0.54)) {
+        aFont -= 2;
+        ctx.font = `900 ${aFont}px ${fontStack}`;
+        aLines = wrapArabicText(ctx, clueAnswer, ansW - 72);
+      }
+      const lineH = aFont * 1.22;
+      const startY = ansH * 0.1 - ((aLines.length - 1) * lineH) / 2;
+      ctx.fillStyle = '#FFFFFF';
+      aLines.slice(0, 2).forEach((ln, lIdx) => {
+        ctx.fillText(ln, 0, startY + lIdx * lineH);
+      });
+    }
     ctx.restore();
   }
 

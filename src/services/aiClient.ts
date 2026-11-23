@@ -271,7 +271,7 @@ async function generateQuizDirectlyInApk(
   topic: string,
   count: number,
   difficulty: string,
-  contentType: 'general' | 'math' | 'trueFalse'
+  contentType: 'general' | 'math' | 'trueFalse' | 'clues' | 'versus'
 ): Promise<QuestionSlide[]> {
   try {
     const { GoogleGenAI, ThinkingLevel, Type } = await import('@google/genai');
@@ -279,8 +279,12 @@ async function generateQuizDirectlyInApk(
     const safeCount = Math.max(1, Math.min(12, Math.round(Number(count) || 3)));
     const diffLabel = difficulty && difficulty.trim() ? difficulty.trim() : 'متنوع';
     const isTrueFalse = contentType === 'trueFalse';
+    const isClues = contentType === 'clues';
+    const isVersus = contentType === 'versus';
     const isMath =
       !isTrueFalse &&
+      !isClues &&
+      !isVersus &&
       (contentType === 'math' ||
         /رياضيات|جبر|معادل|كسر|كسور|جذر|جذور|حساب|هندسة|مثلث|مشتق|تكامل/i.test(topic));
 
@@ -303,7 +307,35 @@ async function generateQuizDirectlyInApk(
 - options: مصفوفة تحتوي خيارين بالضبط هما ["صح", "خطأ"]
 - correctIndex: 0 إذا كانت العبارة صحيحة، أو 1 إذا كانت خاطئة (نوّع بين 0 و 1)
 - explanationText: تصحيح أو توضيح قصير جداً (أقل من 12 كلمة)`
-      : `الموضوع أو الفكرة المطلوبة: "${topic}"
+      : isClues
+        ? `الموضوع أو الفكرة المطلوبة: "${topic}"
+عدد الألغاز المطلوبة: ${safeCount}
+مستوى الصعوبة: ${diffLabel}
+
+أنشئ ${safeCount} لغزاً بنمط (3 تلميحات / من أنا؟) باللغة العربية الفصحى المشوقة والمناسبة لفيديوهات يوتيوب شورتس.
+أرجع مصفوفة JSON فقط (JSON Array) بدون أي نص إضافي خارج JSON، بحيث يحتوي كل عنصر على:
+- badgeText: عنوان قصير للشارة العلوية (مثال: 3 تلميحات · لغز 1)
+- question: سؤال قصير ومشوق (مثال: من أنا؟ أو ما هي هذه الدولة؟ - أقل من 10 كلمات)
+- options: مصفوفة من 4 عناصر نصية بالضبط بهذا الترتيب:
+  * العنصر [0]: التلميح الأول (غريب وقصير، أقل من 10 كلمات)
+  * العنصر [1]: التلميح الثاني (أقرب قليلاً للحل وقصير، أقل من 10 كلمات)
+  * العنصر [2]: التلميح الثالث (تلميح واضح يكاد يكشف الحل، أقل من 10 كلمات)
+  * العنصر [3]: الإجابة الصحيحة النهائية (كلمة أو كلمتان فقط، بدون شرح)
+- correctIndex: دائماً الرقم 3
+- explanationText: حقيقة سريعة ومدهشة عن الإجابة (أقل من 12 كلمة)`
+        : isVersus
+          ? `الموضوع أو الفكرة المطلوبة: "${topic}"
+عدد المقارنات المطلوبة: ${safeCount}
+مستوى الصعوبة: ${diffLabel}
+
+أنشئ ${safeCount} تحدياً بنمط (مقارنة VS بين طرفين) باللغة العربية الفصحى السلسة والمناسبة لفيديوهات الشورتس.
+أرجع مصفوفة JSON فقط (JSON Array) بدون أي نص إضافي خارج JSON، بحيث يحتوي كل عنصر على:
+- badgeText: عنوان قصير للشارة العلوية (مثال: مقارنة VS · تحدي 1)
+- question: سؤال مقارنة قصير ومباشر (مثال: أيهما أكبر مساحة؟ أو أيهما أسرع؟ - أقل من 12 كلمة)
+- options: مصفوفة تحتوي اسمَي الطرفين المتنافسين بالضبط (اسمان قصيران واضحان)
+- correctIndex: 0 إذا كان الطرف الأول هو الصحيح، أو 1 إذا كان الطرف الثاني (نوّع بين 0 و 1)
+- explanationText: معلومة رقمية أو سبب سريع للفوز (أقل من 12 كلمة)`
+          : `الموضوع أو الفكرة المطلوبة: "${topic}"
 عدد الأسئلة المطلوبة: ${safeCount}
 مستوى الصعوبة: ${diffLabel}
 ${mathGuidelines}
@@ -324,7 +356,7 @@ ${mathGuidelines}
         config: {
           thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
           systemInstruction:
-            'أنت خبير في إعداد أسئلة المسابقات والرياضيات لفيديوهات يوتيوب باللغة العربية. التزم بالدقة العلمية والرياضية، الاختصار الواضح، وتنويع موضع الإجابة الصحيحة.',
+            'أنت خبير في إعداد أسئلة المسابقات والتحديات والرياضيات لفيديوهات يوتيوب باللغة العربية. التزم بالدقة العلمية والرياضية، الاختصار الواضح، وتنويع موضع الإجابة الصحيحة.',
           responseMimeType: 'application/json',
           responseSchema: {
             type: Type.ARRAY,
@@ -357,13 +389,14 @@ ${mathGuidelines}
       explanationText?: string;
     }>;
 
+    const minOpts = isTrueFalse || isVersus ? 2 : 4;
     const normalized = parsed
       .filter(
         (item) =>
           item &&
           item.question &&
           Array.isArray(item.options) &&
-          item.options.length >= (isTrueFalse ? 2 : 4)
+          item.options.length >= minOpts
       )
       .slice(0, safeCount)
       .map((item, idx) => {
@@ -379,6 +412,40 @@ ${mathGuidelines}
             question: item.question!.trim(),
             options: [o0, o1, '', ''] as [string, string, string, string],
             correctIndex: cIdx,
+            explanationText: (item.explanationText ?? '').trim(),
+          };
+        }
+
+        if (isVersus) {
+          const rawIdx = Number(item.correctIndex);
+          const cIdx = (rawIdx === 1 ? 1 : 0) as 0 | 1;
+          const o0 = String(item.options?.[0] ?? 'الطرف الأول').trim() || 'الطرف الأول';
+          const o1 = String(item.options?.[1] ?? 'الطرف الثاني').trim() || 'الطرف الثاني';
+          return {
+            id: `ai-slide-${Date.now()}-${idx}`,
+            slideType: 'versus' as const,
+            badgeText: (item.badgeText ?? `مقارنة VS · ${idx + 1}`).trim(),
+            question: item.question!.trim(),
+            options: [o0, o1, '', ''] as [string, string, string, string],
+            correctIndex: cIdx,
+            explanationText: (item.explanationText ?? '').trim(),
+          };
+        }
+
+        if (isClues) {
+          const opts = item.options!.slice(0, 4).map((o) => String(o).trim()) as [
+            string,
+            string,
+            string,
+            string
+          ];
+          return {
+            id: `ai-slide-${Date.now()}-${idx}`,
+            slideType: 'clues' as const,
+            badgeText: (item.badgeText ?? `3 تلميحات · ${idx + 1}`).trim(),
+            question: item.question!.trim(),
+            options: opts,
+            correctIndex: 3 as const,
             explanationText: (item.explanationText ?? '').trim(),
           };
         }
@@ -546,7 +613,7 @@ export async function generateAiQuizSlides(
   topic: string,
   count: number,
   difficulty: string,
-  contentType: 'general' | 'math' | 'trueFalse' = 'general'
+  contentType: 'general' | 'math' | 'trueFalse' | 'clues' | 'versus' = 'general'
 ): Promise<QuestionSlide[]> {
   if (EMBEDDED_CLIENT_GEMINI_KEYS.length > 0 && !BUILD_API_BASE) {
     return generateQuizDirectlyInApk(topic, count, difficulty, contentType);
@@ -680,12 +747,23 @@ export async function generateSlideVoiceoverSafe(
     }
 
     if (mode === 'full') {
-      const optCount = slide.slideType === 'trueFalse' ? 2 : 4;
+      const optCount =
+        slide.slideType === 'trueFalse' || slide.slideType === 'versus'
+          ? 2
+          : slide.slideType === 'clues'
+            ? 3
+            : 4;
+      const itemLabel =
+        slide.slideType === 'clues'
+          ? 'التلميح'
+          : slide.slideType === 'versus'
+            ? 'الطرف'
+            : 'الخيار';
       for (let i = 0; i < optCount; i++) {
         const optText = (slide.options[i] ?? '').trim();
         if (!optText) continue;
         await pause(280);
-        onStep?.(`جارٍ توليد صوت الخيار ${i + 1} من ${optCount}...`);
+        onStep?.(`جارٍ توليد صوت ${itemLabel} ${i + 1} من ${optCount}...`);
         voiceover.options[i] = await generateTtsClip(
           optText,
           voiceName,
@@ -696,7 +774,8 @@ export async function generateSlideVoiceoverSafe(
     }
 
     if (mode === 'questionAndAnswer' || mode === 'full') {
-      const correctOptText = (slide.options[slide.correctIndex] ?? '').trim();
+      const ansIdx = slide.slideType === 'clues' ? 3 : slide.correctIndex;
+      const correctOptText = (slide.options[ansIdx] ?? '').trim();
       if (correctOptText) {
         await pause(280);
         onStep?.('جارٍ توليد صوت الإجابة الصحيحة...');

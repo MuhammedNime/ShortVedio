@@ -155,21 +155,57 @@ export async function idbDelete(key: string): Promise<void> {
 }
 
 function sanitizeSlide(raw: Partial<QuestionSlide> | null | undefined, idx: number): QuestionSlide {
-  const slideType = raw?.slideType === 'trueFalse' ? 'trueFalse' : 'multiple';
+  const slideType =
+    raw?.slideType === 'trueFalse' ||
+    raw?.slideType === 'clues' ||
+    raw?.slideType === 'versus'
+      ? raw.slideType
+      : 'multiple';
   const rawOpts = Array.isArray(raw?.options) ? raw.options : [];
   const options: [string, string, string, string] = [
-    typeof rawOpts[0] === 'string' ? rawOpts[0] : slideType === 'trueFalse' ? 'صح' : 'الخيار الأول',
-    typeof rawOpts[1] === 'string' ? rawOpts[1] : slideType === 'trueFalse' ? 'خطأ' : 'الخيار الثاني',
-    typeof rawOpts[2] === 'string' ? rawOpts[2] : slideType === 'trueFalse' ? '' : 'الخيار الثالث',
-    typeof rawOpts[3] === 'string' ? rawOpts[3] : slideType === 'trueFalse' ? '' : 'الخيار الرابع',
+    typeof rawOpts[0] === 'string'
+      ? rawOpts[0]
+      : slideType === 'trueFalse'
+        ? 'صح'
+        : slideType === 'clues'
+          ? 'التلميح الأول'
+          : slideType === 'versus'
+            ? 'الطرف الأول'
+            : 'الخيار الأول',
+    typeof rawOpts[1] === 'string'
+      ? rawOpts[1]
+      : slideType === 'trueFalse'
+        ? 'خطأ'
+        : slideType === 'clues'
+          ? 'التلميح الثاني'
+          : slideType === 'versus'
+            ? 'الطرف الثاني'
+            : 'الخيار الثاني',
+    typeof rawOpts[2] === 'string'
+      ? rawOpts[2]
+      : slideType === 'trueFalse' || slideType === 'versus'
+        ? ''
+        : slideType === 'clues'
+          ? 'التلميح الثالث'
+          : 'الخيار الثالث',
+    typeof rawOpts[3] === 'string'
+      ? rawOpts[3]
+      : slideType === 'trueFalse' || slideType === 'versus'
+        ? ''
+        : slideType === 'clues'
+          ? 'الإجابة الصحيحة'
+          : 'الخيار الرابع',
   ];
   const rawIdx = Number(raw?.correctIndex);
-  const maxOptIdx = slideType === 'trueFalse' ? 1 : 3;
-  const correctIndex = Math.max(0, Math.min(maxOptIdx, Math.round(Number.isFinite(rawIdx) ? rawIdx : 0))) as
-    | 0
-    | 1
-    | 2
-    | 3;
+  const maxOptIdx = slideType === 'trueFalse' || slideType === 'versus' ? 1 : 3;
+  const correctIndex =
+    slideType === 'clues'
+      ? 3
+      : (Math.max(0, Math.min(maxOptIdx, Math.round(Number.isFinite(rawIdx) ? rawIdx : 0))) as
+          | 0
+          | 1
+          | 2
+          | 3);
 
   const imageChallengeMode =
     raw?.imageChallengeMode === 'blurToClear' || raw?.imageChallengeMode === 'gradualClear'

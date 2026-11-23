@@ -8,9 +8,11 @@ import {
   Music,
   Palette,
   Redo2,
+  SlidersHorizontal,
   Sparkles,
   Sun,
   Undo2,
+  Youtube,
 } from 'lucide-react';
 import { soundEngine } from './audio/soundEngine';
 import { AiGeneratorPanel } from './components/AiGeneratorPanel';
@@ -24,6 +26,17 @@ import { PWAInstallButton } from './components/PWAInstallButton';
 import { ShortsPreviewStage } from './components/ShortsPreviewStage';
 import { SlidesEditorPanel } from './components/SlidesEditorPanel';
 import { TemplateDesignPanel } from './components/TemplateDesignPanel';
+import { YouTubePublishPanel } from './components/YouTubePublishPanel';
+import { YoutubePublishKit } from './services/aiClient';
+import {
+  YouTubeChannelInfo,
+  YouTubePlaylistItem,
+  YouTubePrivacyStatus,
+  connectYouTubeWithPopup,
+  disconnectYouTubeSession,
+  fetchMyYouTubePlaylists,
+  initYouTubeAuthListener,
+} from './services/youtubeClient';
 import {
   loadProjectFromStore,
   normalizeLoadedProject,
@@ -43,8 +56,29 @@ import {
 import { isAppLockEnabled } from './utils/appLock';
 import { setRootBackHandler } from './utils/androidBack';
 
-type StudioTab = 'slides' | 'ai' | 'template' | 'audio' | 'import';
+type StudioTab = 'slides' | 'ai' | 'template' | 'audio' | 'import' | 'youtube';
 type MobileStageMode = 'compact' | 'expanded' | 'collapsed';
+
+function buildDefaultPublishKit(proj: QuizProject): YoutubePublishKit {
+  const targetSlides = proj.slides;
+  const firstQ = (targetSlides[0]?.question || 'تحدي المعلومات').trim();
+  const shortQ = firstQ.length > 48 ? `${firstQ.slice(0, 48)}...` : firstQ;
+  const isShorts = proj.template.aspectRatio !== '16:9';
+  const hashtags = isShorts
+    ? ['#Shorts', '#أسئلة', '#تحدي_المعلومات', '#اختبر_ذكاءك', '#ثقافة_عامة']
+    : ['#أسئلة', '#تحدي_المعلومات', '#اختبر_ذكاءك', '#ثقافة_عامة'];
+  const title = isShorts ? `${shortQ} #Shorts` : `تحدي الأسئلة: ${shortQ}`;
+  const description = `هل تستطيع الإجابة على ${
+    targetSlides.length > 1 ? `جميع الأسئلة (${targetSlides.length} أسئلة)` : 'هذا السؤال'
+  } قبل انتهاء الوقت؟ ⏱️🔥\nاكتب نتيجتك في التعليقات ولا تنسَ الاشتراك في القناة!\n\n${hashtags.join(' ')}`;
+  const tags = ['أسئلة', 'تحدي المعلومات', 'اختبر ذكاءك', 'شورتس', 'ثقافة عامة', 'مسابقات'];
+  const pinnedComment =
+    targetSlides.length > 1
+      ? `كم إجابة صحيحة جبت من أصل ${targetSlides.length}؟ اكتب نتيجتك في التعليقات 👇🔥`
+      : 'هل عرفت الإجابة الصحيحة قبل انتهاء المؤقت؟ اكتب نعم أو لا في التعليقات 👇🔥';
+
+  return { title, description, hashtags, tags, pinnedComment };
+}
 
 export default function App() {
   const [project, setProject] = useState<QuizProject>(() => createDefaultProject());
@@ -59,15 +93,48 @@ export default function App() {
   const [isLocked, setIsLocked] = useState(() => isAppLockEnabled());
   const [isLockModalOpen, setIsLockModalOpen] = useState(false);
   const [isProjectsOpen, setIsProjectsOpen] = useState(false);
+  const [isToolsMenuOpen, setIsToolsMenuOpen] = useState(false);
   const [canUndo, setCanUndo] = useState(false);
   const [canRedo, setCanRedo] = useState(false);
 
+  // Shared YouTube Auth + AI Publishing Kit State
+  const [publishKit, setPublishKit] = useState<YoutubePublishKit>(() =>
+    buildDefaultPublishKit(createDefaultProject())
+  );
+  const [tagsInput, setTagsInput] = useState(() =>
+    buildDefaultPublishKit(createDefaultProject()).tags.join('، ')
+  );
+  const kitEditedRef = useRef(false);
+  const [ytConnected, setYtConnected] = useState(false);
+  const [ytChannel, setYtChannel] = useState<YouTubeChannelInfo | null>(null);
+  const [ytEmail, setYtEmail] = useState<string | null>(null);
+  const [ytPlaylists, setYtPlaylists] = useState<YouTubePlaylistItem[]>([]);
+  const [selectedPlaylistId, setSelectedPlaylistId] = useState('');
+  const [ytPrivacy, setYtPrivacy] = useState<YouTubePrivacyStatus>('private');
+  const [ytUseSchedule, setYtUseSchedule] = useState(false);
+  const [ytScheduleLocal, setYtScheduleLocal] = useState('');
+  const [ytAutoPostComment, setYtAutoPostComment] = useState(true);
+  const [isConnectingYt, setIsConnectingYt] = useState(false);
+  const [ytAuthError, setYtAuthError] = useState('');
+
+  const toolsMenuRef = useRef<HTMLDivElement | null>(null);
   const hasLocalMutationRef = useRef(false);
   const projectRef = useRef(project);
   projectRef.current = project;
   const pastRef = useRef<QuizProject[]>([]);
   const futureRef = useRef<QuizProject[]>([]);
   const lastHistoryPushTimeRef = useRef(0);
+
+  useEffect(() => {
+    if (!isToolsMenuOpen) return;
+    const onPointerDown = (e: PointerEvent) => {
+      if (toolsMenuRef.current && !toolsMenuRef.current.contains(e.target as Node)) {
+        setIsToolsMenuOpen(false);
+      }
+    };
+    window.addEventListener('pointerdown', onPointerDown);
+    return () => window.removeEventListener('pointerdown', onPointerDown);
+  }, [isToolsMenuOpen]);
 
   const navigateToTab = useCallback((nextTab: StudioTab) => {
     setActiveTab((prev) => {
@@ -217,6 +284,75 @@ export default function App() {
       window.removeEventListener('beforeunload', flushSave);
     };
   }, [isLoaded]);
+
+  useEffect(() => {
+    return initYouTubeAuthListener((session) => {
+      setYtConnected(session.connected);
+      setYtChannel(session.channel);
+      setYtEmail(session.email);
+      if (session.connected && session.token) {
+        void fetchMyYouTubePlaylists(session.token).then(setYtPlaylists);
+      } else {
+        setYtPlaylists([]);
+        setSelectedPlaylistId('');
+      }
+    });
+  }, []);
+
+  useEffect(() => {
+    if (kitEditedRef.current) return;
+    const fallback = buildDefaultPublishKit(project);
+    setPublishKit(fallback);
+    setTagsInput(fallback.tags.join('، '));
+  }, [project.slides, project.template.aspectRatio]);
+
+  const handleUpdatePublishKit = useCallback(
+    (updater: (prev: YoutubePublishKit) => YoutubePublishKit) => {
+      kitEditedRef.current = true;
+      setPublishKit(updater);
+    },
+    []
+  );
+
+  const handleUpdateTagsInput = useCallback((val: string) => {
+    kitEditedRef.current = true;
+    setTagsInput(val);
+  }, []);
+
+  const handleResetDefaultKit = useCallback(() => {
+    kitEditedRef.current = false;
+    const fallback = buildDefaultPublishKit(projectRef.current);
+    setPublishKit(fallback);
+    setTagsInput(fallback.tags.join('، '));
+  }, []);
+
+  const handleConnectYouTube = useCallback(async () => {
+    if (isConnectingYt) return;
+    setIsConnectingYt(true);
+    setYtAuthError('');
+    try {
+      const res = await connectYouTubeWithPopup();
+      setYtConnected(true);
+      setYtChannel(res.channel);
+      setYtEmail(res.email);
+      const pls = await fetchMyYouTubePlaylists(res.accessToken);
+      setYtPlaylists(pls);
+    } catch (err) {
+      setYtAuthError(err instanceof Error ? err.message : 'تعذر ربط حساب Google / YouTube.');
+    } finally {
+      setIsConnectingYt(false);
+    }
+  }, [isConnectingYt]);
+
+  const handleDisconnectYouTube = useCallback(async () => {
+    setYtAuthError('');
+    await disconnectYouTubeSession();
+    setYtConnected(false);
+    setYtChannel(null);
+    setYtEmail(null);
+    setYtPlaylists([]);
+    setSelectedPlaylistId('');
+  }, []);
 
   const audioSyncSigRef = useRef('');
   useEffect(() => {
@@ -467,6 +603,7 @@ export default function App() {
     { id: 'template', label: 'القالب والتصميم' },
     { id: 'audio', label: 'الأصوات والتوقيت' },
     { id: 'import', label: 'استيراد سريع' },
+    { id: 'youtube', label: 'نشر يوتيوب' },
   ];
 
   if (isLocked) {
@@ -486,8 +623,8 @@ export default function App() {
           استوديو شورتس الأسئلة
         </a>
 
-        {/* Zone 2: 5 single-line navigation links (Desktop / Tablet) */}
-        <nav className="hidden md:flex items-center gap-6 text-sm font-semibold text-[var(--pmuted)]">
+        {/* Zone 2: 6 single-line navigation links (Desktop / Tablet) */}
+        <nav className="hidden md:flex items-center gap-4 lg:gap-6 text-xs lg:text-sm font-semibold text-[var(--pmuted)]">
           {navTabs.map((tab) => {
             const active = activeTab === tab.id;
             return (
@@ -529,26 +666,26 @@ export default function App() {
             mobileStageMode === 'expanded' ? 'hidden lg:flex' : 'flex flex-1 min-h-0'
           } flex-col bg-[var(--panel)] lg:border-l border-t lg:border-t-0 border-[var(--pline)] min-h-0`}
         >
-          {/* Unboxed workspace metadata strip + lock + light/dark toggle */}
-          <div className="flex flex-wrap items-center justify-between gap-y-1.5 gap-x-2 px-3.5 py-2 lg:px-5 lg:py-2.5 border-b border-[var(--pline)] text-[11px] lg:text-xs text-[var(--pmuted)] shrink-0">
-            <div className="flex items-center gap-1.5 lg:gap-2">
+          {/* Unboxed workspace metadata strip + Undo/Redo + Projects + Consolidated Tools Menu */}
+          <div className="flex items-center justify-between gap-2 px-3.5 py-2 lg:px-5 lg:py-2.5 border-b border-[var(--pline)] text-[11px] lg:text-xs text-[var(--pmuted)] shrink-0">
+            <div className="flex items-center gap-1.5 truncate">
               <span>{project.slides.length} أسئلة</span>
               <span aria-hidden="true">·</span>
-              <span className="font-mono-nums">
+              <span className="font-mono-nums hidden sm:inline">
                 {canvasDims.width}×{canvasDims.height}
               </span>
-              <span aria-hidden="true">·</span>
+              <span aria-hidden="true" className="hidden sm:inline">·</span>
               <span className="font-mono-nums">{totalDuration.toFixed(1)} ث</span>
             </div>
 
-            <div className="flex items-center gap-2">
-              <div className="flex items-center gap-0.5 border border-[var(--pline)] rounded-md bg-[var(--surface)] px-1 py-0.5">
+            <div className="flex items-center gap-1.5 shrink-0">
+              <div className="flex items-center border border-[var(--pline)] rounded-lg bg-[var(--surface)] overflow-hidden">
                 <button
                   type="button"
                   onClick={handleUndo}
                   disabled={!canUndo}
                   title="تراجع (Ctrl+Z)"
-                  className="p-1 text-[var(--ptxt)] disabled:opacity-30 hover:text-[#00B050] cursor-pointer disabled:cursor-default"
+                  className="h-7 px-1.5 text-[var(--ptxt)] disabled:opacity-30 hover:text-[#00B050] cursor-pointer disabled:cursor-default"
                 >
                   <Undo2 className="w-3.5 h-3.5" />
                 </button>
@@ -557,39 +694,72 @@ export default function App() {
                   onClick={handleRedo}
                   disabled={!canRedo}
                   title="إعادة (Ctrl+Y)"
-                  className="p-1 text-[var(--ptxt)] disabled:opacity-30 hover:text-[#00B050] cursor-pointer disabled:cursor-default"
+                  className="h-7 px-1.5 text-[var(--ptxt)] disabled:opacity-30 hover:text-[#00B050] border-r border-[var(--pline)] cursor-pointer disabled:cursor-default"
                 >
                   <Redo2 className="w-3.5 h-3.5" />
                 </button>
               </div>
+
               <button
                 type="button"
                 onClick={() => setIsProjectsOpen(true)}
                 title="مكتبة المشاريع المحفوظة"
-                className="flex items-center gap-1 text-[11px] font-bold text-[#00B050] dark:text-[#6ee7b7] hover:underline cursor-pointer"
+                className="flex items-center gap-1 h-7 px-2 rounded-lg bg-[var(--surface)] border border-[var(--pline)] hover:border-[#00B050] text-[11px] font-bold text-[#00B050] dark:text-[#6ee7b7] cursor-pointer whitespace-nowrap"
               >
                 <FolderOpen className="w-3.5 h-3.5" />
                 <span>المشاريع</span>
               </button>
-              <PWAInstallButton />
-              <button
-                type="button"
-                onClick={() => setIsLockModalOpen(true)}
-                title="قفل الخصوصية الشخصي (كلمة مرور التطبيق)"
-                className="flex items-center gap-1 text-[11px] font-semibold text-[var(--pmuted)] hover:text-[var(--ptxt)] cursor-pointer"
-              >
-                <Lock className="w-3.5 h-3.5 text-[#00B050]" />
-                <span>القفل</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => setStudioDark((d) => !d)}
-                title={studioDark ? 'التبديل للوضع الفاتح الدافئ' : 'التبديل للوضع الداكن'}
-                className="flex items-center gap-1 text-[11px] font-semibold text-[var(--pmuted)] hover:text-[var(--ptxt)] cursor-pointer"
-              >
-                {studioDark ? <Sun className="w-3.5 h-3.5 text-[var(--gold)]" /> : <Moon className="w-3.5 h-3.5" />}
-                <span>{studioDark ? 'فاتح' : 'داكن'}</span>
-              </button>
+
+              <div className="relative" ref={toolsMenuRef}>
+                <button
+                  type="button"
+                  onClick={() => setIsToolsMenuOpen((v) => !v)}
+                  title="الأدوات والمظهر والقفل"
+                  className={`flex items-center gap-1 h-7 px-2 rounded-lg border text-[11px] font-semibold transition-colors cursor-pointer whitespace-nowrap ${
+                    isToolsMenuOpen
+                      ? 'bg-[#00B050]/15 border-[#00B050] text-[#00B050] dark:text-[#6ee7b7]'
+                      : 'bg-[var(--surface)] border-[var(--pline)] text-[var(--ptxt)] hover:border-[var(--gold)]'
+                  }`}
+                >
+                  <SlidersHorizontal className="w-3.5 h-3.5" />
+                  <span>الأدوات</span>
+                </button>
+
+                {isToolsMenuOpen && (
+                  <div className="absolute left-0 top-9 z-40 w-44 p-1.5 rounded-xl bg-[var(--panel)] border border-[var(--pline)] shadow-xl flex flex-col gap-0.5">
+                    <PWAInstallButton
+                      variant="menuItem"
+                      onAction={() => setIsToolsMenuOpen(false)}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsToolsMenuOpen(false);
+                        setIsLockModalOpen(true);
+                      }}
+                      className="flex items-center gap-2 w-full px-3 py-2 rounded-lg text-xs font-semibold text-[var(--ptxt)] hover:bg-[var(--surface)] transition-colors cursor-pointer whitespace-nowrap"
+                    >
+                      <Lock className="w-3.5 h-3.5 text-[#00B050] shrink-0" />
+                      <span>قفل الخصوصية</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setStudioDark((d) => !d);
+                        setIsToolsMenuOpen(false);
+                      }}
+                      className="flex items-center gap-2 w-full px-3 py-2 rounded-lg text-xs font-semibold text-[var(--ptxt)] hover:bg-[var(--surface)] transition-colors cursor-pointer whitespace-nowrap"
+                    >
+                      {studioDark ? (
+                        <Sun className="w-3.5 h-3.5 text-[var(--gold)] shrink-0" />
+                      ) : (
+                        <Moon className="w-3.5 h-3.5 text-[var(--gold)] shrink-0" />
+                      )}
+                      <span>{studioDark ? 'المظهر الفاتح' : 'المظهر الداكن'}</span>
+                    </button>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
 
@@ -708,6 +878,36 @@ export default function App() {
                 }}
               />
             )}
+
+            {activeTab === 'youtube' && (
+              <YouTubePublishPanel
+                project={project}
+                publishKit={publishKit}
+                tagsInput={tagsInput}
+                onUpdatePublishKit={handleUpdatePublishKit}
+                onUpdateTagsInput={handleUpdateTagsInput}
+                onResetDefaultKit={handleResetDefaultKit}
+                ytConnected={ytConnected}
+                ytChannel={ytChannel}
+                ytEmail={ytEmail}
+                ytPlaylists={ytPlaylists}
+                selectedPlaylistId={selectedPlaylistId}
+                onSelectPlaylistId={setSelectedPlaylistId}
+                ytPrivacy={ytPrivacy}
+                onChangePrivacy={setYtPrivacy}
+                ytUseSchedule={ytUseSchedule}
+                onChangeUseSchedule={setYtUseSchedule}
+                ytScheduleLocal={ytScheduleLocal}
+                onChangeScheduleLocal={setYtScheduleLocal}
+                ytAutoPostComment={ytAutoPostComment}
+                onChangeAutoPostComment={setYtAutoPostComment}
+                isConnectingYt={isConnectingYt}
+                ytAuthError={ytAuthError}
+                onConnectYouTube={() => void handleConnectYouTube()}
+                onDisconnectYouTube={() => void handleDisconnectYouTube()}
+                onOpenExport={() => setIsExportOpen(true)}
+              />
+            )}
           </div>
         </aside>
 
@@ -718,7 +918,7 @@ export default function App() {
               ? 'flex-1 min-h-0'
               : mobileStageMode === 'collapsed'
               ? 'shrink-0 lg:flex-1 lg:min-h-0'
-              : 'h-[245px] sm:h-[285px] shrink-0 lg:h-auto lg:flex-1 lg:min-h-0'
+              : 'h-[215px] sm:h-[260px] shrink-0 lg:h-auto lg:flex-1 lg:min-h-0'
           }`}
         >
           <ShortsPreviewStage
@@ -755,7 +955,7 @@ export default function App() {
       {/* Native Phone Bottom Navigation Bar (< md / mobile) */}
       <nav
         aria-label="أقسام الاستوديو"
-        className="md:hidden grid grid-cols-5 border-t border-[var(--pline)] bg-[var(--panel)] shrink-0 pb-[env(safe-area-inset-bottom)]"
+        className="md:hidden grid grid-cols-6 border-t border-[var(--pline)] bg-[var(--panel)] shrink-0 pb-[env(safe-area-inset-bottom)]"
       >
         {[
           { id: 'slides', label: 'الأسئلة', icon: Layers },
@@ -763,6 +963,7 @@ export default function App() {
           { id: 'template', label: 'القالب', icon: Palette },
           { id: 'audio', label: 'الأصوات', icon: Music },
           { id: 'import', label: 'استيراد', icon: Film },
+          { id: 'youtube', label: 'يوتيوب', icon: Youtube },
         ].map((t) => {
           const Icon = t.icon;
           const active = activeTab === t.id && mobileStageMode !== 'expanded';
@@ -783,10 +984,10 @@ export default function App() {
               }`}
             >
               {active && (
-                <span className="absolute top-0 inset-x-3 h-0.5 rounded-b-full bg-[#00B050]" />
+                <span className="absolute top-0 inset-x-2 h-0.5 rounded-b-full bg-[#00B050]" />
               )}
               <Icon className="w-4 h-4" />
-              <span>{t.label}</span>
+              <span className="whitespace-nowrap">{t.label}</span>
             </button>
           );
         })}
@@ -797,6 +998,28 @@ export default function App() {
         isOpen={isExportOpen}
         project={project}
         onClose={() => setIsExportOpen(false)}
+        publishKit={publishKit}
+        tagsInput={tagsInput}
+        onUpdatePublishKit={handleUpdatePublishKit}
+        onUpdateTagsInput={handleUpdateTagsInput}
+        ytConnected={ytConnected}
+        ytChannel={ytChannel}
+        ytEmail={ytEmail}
+        ytPlaylists={ytPlaylists}
+        selectedPlaylistId={selectedPlaylistId}
+        onSelectPlaylistId={setSelectedPlaylistId}
+        ytPrivacy={ytPrivacy}
+        onChangePrivacy={setYtPrivacy}
+        ytUseSchedule={ytUseSchedule}
+        onChangeUseSchedule={setYtUseSchedule}
+        ytScheduleLocal={ytScheduleLocal}
+        onChangeScheduleLocal={setYtScheduleLocal}
+        ytAutoPostComment={ytAutoPostComment}
+        onChangeAutoPostComment={setYtAutoPostComment}
+        isConnectingYt={isConnectingYt}
+        ytAuthError={ytAuthError}
+        onConnectYouTube={handleConnectYouTube}
+        onDisconnectYouTube={handleDisconnectYouTube}
       />
 
       {/* Multi-Project Library Modal */}
