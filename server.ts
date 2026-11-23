@@ -10,7 +10,12 @@ const PORT = 3000;
 const serverKeyCooldowns = new Map<string, number>();
 
 function getConfiguredServerKeys(): string[] {
-  const combined = [process.env.GEMINI_API_KEY || '', process.env.GEMINI_API_KEYS || ''].join('\n');
+  const numbered = Array.from({ length: 10 }, (_, idx) => process.env[`GEMINI_API_KEY_${idx + 1}`] || '');
+  const combined = [
+    process.env.GEMINI_API_KEY || '',
+    process.env.GEMINI_API_KEYS || '',
+    ...numbered,
+  ].join('\n');
   const seen = new Set<string>();
   const keys: string[] = [];
   for (const part of combined.split(/[\s,;]+/)) {
@@ -474,6 +479,347 @@ ${mathGuidelines}
     }
   });
 
+  // Generate AI YouTube Publishing Kit (Title, Description, Hashtags, Tags, Pinned Comment)
+  app.post('/api/ai/generate-publish-kit', async (req, res) => {
+    try {
+      const { questions, aspectRatio, hookText } = req.body as {
+        questions?: Array<{
+          question?: string;
+          options?: string[];
+          correctIndex?: number;
+          explanationText?: string;
+        }>;
+        aspectRatio?: '9:16' | '16:9';
+        hookText?: string;
+      };
+
+      const validQuestions = Array.isArray(questions)
+        ? questions.filter((q) => (q?.question ?? '').trim().length > 0).slice(0, 15)
+        : [];
+      if (validQuestions.length === 0) {
+        res.status(400).json({ error: 'لا توجد أسئلة لتوليد بيانات النشر لها.' });
+        return;
+      }
+
+      const isShorts = aspectRatio !== '16:9';
+      const summaryLines = validQuestions
+        .map((q, i) => {
+          const opts = Array.isArray(q.options) ? q.options.filter(Boolean).join(' / ') : '';
+          return `${i + 1}) ${String(q.question).trim()}${opts ? ` [${opts}]` : ''}`;
+        })
+        .join('\n');
+
+      const promptText = `لدينا فيديو مسابقة أسئلة باللغة العربية بصيغة ${isShorts ? 'YouTube Shorts (عمودي 9:16)' : 'YouTube أفقي (16:9)'}.
+${hookText?.trim() ? `عبارة البداية (Hook): ${hookText.trim()}\n` : ''}الأسئلة الموجودة في الفيديو:
+${summaryLines}
+
+المطلوب إنشاء حزمة نشر احترافية باللغة العربية تزيد نسبة النقر والتعليقات على يوتيوب، بصيغة JSON فقط تحتوي الحقول التالية:
+- title: عنوان جذاب ومشوق (أقل من 65 حرفاً${isShorts ? '، مع إضافة #Shorts في نهايته' : ''})
+- description: وصف متكامل وجذاب للجمهور يوضح التحدي ويدعو للاشتراك والتفاعل، مع تضمين الهاشتاغات المناسبة في نهايته
+- hashtags: مصفوفة من 5 إلى 8 هاشتاغات عربية وإنجليزية مناسبة تبدأ بـ # (مثل #شورتس #أسئلة #تحدي)
+- tags: مصفوفة من 8 إلى 12 كلمة مفتاحية قوية للبحث في يوتيوب بدون علامة #
+- pinnedComment: تعليق تفاعلي قصير وممتع جاهز للتثبيت تحت الفيديو يدفع المشاهدين لكتابة نتيجتهم في التعليقات`;
+
+      const response = await runServerAiWithRotation((ai) =>
+        ai.models.generateContent({
+          model: 'gemini-4-hydrogen',
+          contents: promptText,
+          config: {
+            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+            systemInstruction:
+              'أنت خبير سيو يوتيوب وصناعة محتوى شورتس المسابقات باللغة العربية. اكتب عناوين عالية النقر بدون حشو، وأوصافاً طبيعية، وتعليقات تفاعلية ذكية.',
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                title: { type: Type.STRING },
+                description: { type: Type.STRING },
+                hashtags: { type: Type.ARRAY, items: { type: Type.STRING } },
+                tags: { type: Type.ARRAY, items: { type: Type.STRING } },
+                pinnedComment: { type: Type.STRING },
+              },
+              required: ['title', 'description', 'hashtags', 'tags', 'pinnedComment'],
+            },
+          },
+        })
+      );
+
+      const rawText = (response.text ?? '{}').trim();
+      const cleaned = rawText
+        .replace(/^```(?:json)?\s*/i, '')
+        .replace(/\s*```$/i, '')
+        .trim();
+      const parsed = JSON.parse(cleaned) as {
+        title?: string;
+        description?: string;
+        hashtags?: string[];
+        tags?: string[];
+        pinnedComment?: string;
+      };
+
+      const hashtags = Array.isArray(parsed.hashtags)
+        ? parsed.hashtags
+            .map((h) => String(h).trim())
+            .filter(Boolean)
+            .map((h) => (h.startsWith('#') ? h : `#${h.replace(/\s+/g, '_')}`))
+            .slice(0, 10)
+        : [];
+      const tags = Array.isArray(parsed.tags)
+        ? parsed.tags
+            .map((t) => String(t).replace(/^#/, '').trim())
+            .filter(Boolean)
+            .slice(0, 15)
+        : [];
+
+      res.json({
+        title: (parsed.title || 'اختبر ذكاءك في هذا التحدي! #Shorts').trim().slice(0, 100),
+        description: (parsed.description || '').trim(),
+        hashtags,
+        tags,
+        pinnedComment: (parsed.pinnedComment || 'كم إجابة صحيحة جبت؟ اكتب نتيجتك في التعليقات 👇').trim(),
+      });
+    } catch (err) {
+      const formatted = formatGeminiError(err);
+      res.status(formatted.status).json({
+        error: formatted.message,
+        quotaExhausted: formatted.quotaExhausted,
+      });
+    }
+  });
+
+  // YouTube OAuth helpers (Popup Flow -> postMessage)
+  const getYouTubeOAuthCredentials = () => {
+    const clientId = (
+      process.env.GOOGLE_CLIENT_ID ||
+      process.env.YOUTUBE_CLIENT_ID ||
+      process.env.VITE_GOOGLE_CLIENT_ID ||
+      ''
+    ).trim();
+    const clientSecret = (
+      process.env.GOOGLE_CLIENT_SECRET ||
+      process.env.YOUTUBE_CLIENT_SECRET ||
+      ''
+    ).trim();
+    return { clientId, clientSecret };
+  };
+
+  const resolveYouTubeCallbackUrl = (req: express.Request): string => {
+    const envAppUrl = (process.env.APP_URL || '').trim().replace(/\/$/, '');
+    if (envAppUrl && envAppUrl !== 'MY_APP_URL' && /^https?:\/\//i.test(envAppUrl)) {
+      return `${envAppUrl}/auth/youtube/callback`;
+    }
+    const queryOrigin = typeof req.query.origin === 'string' ? req.query.origin.trim().replace(/\/$/, '') : '';
+    if (queryOrigin && /^https?:\/\/[a-z0-9.-]+(:\d+)?$/i.test(queryOrigin)) {
+      return `${queryOrigin}/auth/youtube/callback`;
+    }
+    const protoHeader = (req.headers['x-forwarded-proto'] as string | undefined)?.split(',')[0]?.trim();
+    const hostHeader = (req.headers['x-forwarded-host'] as string | undefined)?.split(',')[0]?.trim() || req.headers.host || `localhost:${PORT}`;
+    const proto = protoHeader || (hostHeader.includes('localhost') ? 'http' : 'https');
+    return `${proto}://${hostHeader}/auth/youtube/callback`;
+  };
+
+  app.get('/api/youtube/status', (req, res) => {
+    const { clientId, clientSecret } = getYouTubeOAuthCredentials();
+    const callbackUrl = resolveYouTubeCallbackUrl(req);
+    res.json({
+      configured: Boolean(clientId && clientSecret),
+      hasClientId: Boolean(clientId),
+      callbackUrl,
+    });
+  });
+
+  app.get('/api/youtube/auth-url', (req, res) => {
+    const { clientId, clientSecret } = getYouTubeOAuthCredentials();
+    const redirectUri = resolveYouTubeCallbackUrl(req);
+    if (!clientId || !clientSecret) {
+      res.status(400).json({
+        error:
+          'إعدادات ربط يوتيوب (GOOGLE_CLIENT_ID و GOOGLE_CLIENT_SECRET) غير مضافة في Secrets بعد.',
+        callbackUrl: redirectUri,
+      });
+      return;
+    }
+
+    const statePayload = Buffer.from(
+      JSON.stringify({
+        redirectUri,
+        ts: Date.now(),
+      }),
+      'utf8'
+    ).toString('base64url');
+
+    const params = new URLSearchParams({
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      response_type: 'code',
+      scope: 'https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.force-ssl',
+      access_type: 'offline',
+      include_granted_scopes: 'true',
+      prompt: 'select_account consent',
+      state: statePayload,
+    });
+
+    res.json({
+      url: `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`,
+      redirectUri,
+    });
+  });
+
+  const handleYouTubeOAuthCallback = async (req: express.Request, res: express.Response) => {
+    const renderPopupResult = (payload: Record<string, unknown>, message: string) => {
+      const jsonStr = JSON.stringify(payload).replace(/</g, '\\u003c');
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.send(`<!doctype html>
+<html lang="ar" dir="rtl">
+  <head><meta charset="utf-8"><title>ربط قناة YouTube</title></head>
+  <body style="font-family:system-ui,-apple-system,sans-serif;background:#0c0c0c;color:#f4ead2;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:24px;text-align:center;">
+    <div>
+      <p style="font-size:16px;font-weight:700;margin-bottom:8px;">${message}</p>
+      <p style="font-size:12px;color:#b8a684;">يمكنك إغلاق هذه النافذة والعودة للتطبيق.</p>
+    </div>
+    <script>
+      try {
+        if (window.opener) {
+          window.opener.postMessage(${jsonStr}, '*');
+          setTimeout(function() { window.close(); }, 350);
+        }
+      } catch (e) {}
+    </script>
+  </body>
+</html>`);
+    };
+
+    try {
+      const oauthError = typeof req.query.error === 'string' ? req.query.error : '';
+      if (oauthError) {
+        renderPopupResult(
+          { type: 'YOUTUBE_OAUTH_ERROR', error: `تم إلغاء الربط أو رفضه (${oauthError}).` },
+          'لم يكتمل ربط قناة YouTube.'
+        );
+        return;
+      }
+
+      const code = typeof req.query.code === 'string' ? req.query.code : '';
+      if (!code) {
+        renderPopupResult(
+          { type: 'YOUTUBE_OAUTH_ERROR', error: 'لم يصل رمز التحقق من Google.' },
+          'تعذر إتمام الربط.'
+        );
+        return;
+      }
+
+      let redirectUri = resolveYouTubeCallbackUrl(req);
+      const stateParam = typeof req.query.state === 'string' ? req.query.state : '';
+      if (stateParam) {
+        try {
+          const decoded = JSON.parse(Buffer.from(stateParam, 'base64url').toString('utf8')) as {
+            redirectUri?: string;
+          };
+          if (decoded.redirectUri && /^https?:\/\//i.test(decoded.redirectUri)) {
+            redirectUri = decoded.redirectUri;
+          }
+        } catch {
+          // keep default redirectUri
+        }
+      }
+
+      const { clientId, clientSecret } = getYouTubeOAuthCredentials();
+      if (!clientId || !clientSecret) {
+        renderPopupResult(
+          {
+            type: 'YOUTUBE_OAUTH_ERROR',
+            error: 'بيانات GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET غير مضبوطة على الخادم.',
+          },
+          'إعدادات OAuth غير مكتملة.'
+        );
+        return;
+      }
+
+      const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          code,
+          client_id: clientId,
+          client_secret: clientSecret,
+          redirect_uri: redirectUri,
+          grant_type: 'authorization_code',
+        }).toString(),
+      });
+
+      const tokenJson = (await tokenRes.json()) as {
+        access_token?: string;
+        expires_in?: number;
+        error?: string;
+        error_description?: string;
+      };
+
+      if (!tokenRes.ok || !tokenJson.access_token) {
+        renderPopupResult(
+          {
+            type: 'YOUTUBE_OAUTH_ERROR',
+            error:
+              tokenJson.error_description ||
+              tokenJson.error ||
+              'فشل الحصول على رمز الوصول من Google.',
+          },
+          'تعذر إكمال تفويض YouTube.'
+        );
+        return;
+      }
+
+      let channel: { id: string; title: string; thumbnailUrl?: string } | null = null;
+      try {
+        const chRes = await fetch(
+          'https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true',
+          {
+            headers: { Authorization: `Bearer ${tokenJson.access_token}` },
+          }
+        );
+        if (chRes.ok) {
+          const chData = (await chRes.json()) as {
+            items?: Array<{
+              id?: string;
+              snippet?: { title?: string; thumbnails?: { default?: { url?: string } } };
+            }>;
+          };
+          const first = chData.items?.[0];
+          if (first?.id) {
+            channel = {
+              id: first.id,
+              title: first.snippet?.title || 'قناتي على YouTube',
+              thumbnailUrl: first.snippet?.thumbnails?.default?.url,
+            };
+          }
+        }
+      } catch {
+        // non-fatal
+      }
+
+      renderPopupResult(
+        {
+          type: 'YOUTUBE_OAUTH_SUCCESS',
+          accessToken: tokenJson.access_token,
+          expiresIn: tokenJson.expires_in ?? 3500,
+          channel,
+        },
+        'تم ربط قناة YouTube بنجاح!'
+      );
+    } catch (err) {
+      renderPopupResult(
+        {
+          type: 'YOUTUBE_OAUTH_ERROR',
+          error: err instanceof Error ? err.message : 'حدث خطأ أثناء تفويض YouTube.',
+        },
+        'حدث خطأ غير متوقع.'
+      );
+    }
+  };
+
+  app.get(['/auth/youtube/callback', '/auth/youtube/callback/'], (req, res) => {
+    void handleYouTubeOAuthCallback(req, res);
+  });
+
   const httpServer = http.createServer(app);
 
   // Mount Vite dev middleware or serve static production build
@@ -538,10 +884,19 @@ export function injectQuery(url, queryToInject) {
     app.use(vite.middlewares);
   } else {
     const distDir = path.resolve(process.cwd(), 'dist');
-    app.use(express.static(distDir));
+    app.use(
+      express.static(distDir, {
+        setHeaders(res, filePath) {
+          if (filePath.endsWith('index.html') || filePath.endsWith('sw.js')) {
+            res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+          }
+        },
+      })
+    );
     app.get('*', (_req, res) => {
       const indexFile = path.join(distDir, 'index.html');
       if (fs.existsSync(indexFile)) {
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
         res.sendFile(indexFile);
       } else {
         res.status(404).send('Build not found');

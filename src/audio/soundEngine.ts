@@ -6,6 +6,10 @@ import {
   QuestionSlide,
   SlideAudioClip,
   TemplateSettings,
+  TimingSettings,
+  computeProjectTimeline,
+  getIntroHookDuration,
+  getTotalDuration,
 } from '../types/quiz';
 
 export const BUILTIN_SFX_OPTIONS: { id: BuiltInSfxId; label: string }[] = [
@@ -21,16 +25,30 @@ export const BUILTIN_SFX_OPTIONS: { id: BuiltInSfxId; label: string }[] = [
   { id: 'calmPulse', label: 'نبضة موسيقية هادئة' },
 ];
 
+export interface RenderedExportAudio {
+  buffer: AudioBuffer;
+  speechIntervals: Array<{ start: number; end: number }>;
+}
+
+interface ScheduledVoiceItem {
+  start: number;
+  buffer: AudioBuffer;
+  volume: number;
+  maxEnd: number;
+}
+
 class SoundEngine {
   private ctx: AudioContext | null = null;
-  private ctxCaches = new WeakMap<AudioContext, Map<string, AudioBuffer>>();
-  private bgNodes = new WeakMap<AudioContext, { gain: GainNode; baseVolume: number }>();
+  private ctxCaches = new WeakMap<BaseAudioContext, Map<string, AudioBuffer>>();
+  private bgNodes = new WeakMap<BaseAudioContext, { gain: GainNode; baseVolume: number }>();
   private decodedDurations = new Map<string, number>();
   private activeSfxSources = new Set<AudioBufferSourceNode>();
+  private activeVoiceSource: AudioBufferSourceNode | null = null;
+  private activeVoiceGain: GainNode | null = null;
   private activeBgSource: AudioBufferSourceNode | null = null;
   private activeBgGain: GainNode | null = null;
 
-  private getCacheForContext(ctx: AudioContext): Map<string, AudioBuffer> {
+  private getCacheForContext(ctx: BaseAudioContext): Map<string, AudioBuffer> {
     let map = this.ctxCaches.get(ctx);
     if (!map) {
       map = new Map<string, AudioBuffer>();
@@ -39,16 +57,57 @@ class SoundEngine {
     return map;
   }
 
-  private trackSourceIfPreview(ctx: AudioContext, src: AudioBufferSourceNode): void {
-    if (ctx === this.ctx) {
-      this.activeSfxSources.add(src);
+  private trackSourceIfPreview(
+    ctx: BaseAudioContext,
+    src: AudioBufferSourceNode,
+    channel: 'sfx' | 'voice' = 'sfx',
+    gainNode?: GainNode
+  ): void {
+    if (ctx !== this.ctx) return;
+
+    if (channel === 'voice') {
+      this.stopActiveVoice();
+      this.activeVoiceSource = src;
+      this.activeVoiceGain = gainNode ?? null;
       src.onended = () => {
-        this.activeSfxSources.delete(src);
+        if (this.activeVoiceSource === src) {
+          this.activeVoiceSource = null;
+          this.activeVoiceGain = null;
+        }
       };
+      return;
+    }
+
+    this.activeSfxSources.add(src);
+    src.onended = () => {
+      this.activeSfxSources.delete(src);
+    };
+  }
+
+  public stopActiveVoice(): void {
+    if (this.activeVoiceSource) {
+      try {
+        this.activeVoiceSource.stop();
+        this.activeVoiceSource.disconnect();
+      } catch {
+        // already stopped
+      }
+      this.activeVoiceSource = null;
+    }
+    if (this.activeVoiceGain) {
+      try {
+        this.activeVoiceGain.disconnect();
+      } catch {
+        // already disconnected
+      }
+      this.activeVoiceGain = null;
     }
   }
 
+  private activeSfxGains = new Set<GainNode>();
+
   public stopAllSfxAndVoice(): void {
+    this.stopActiveVoice();
     this.activeSfxSources.forEach((src) => {
       try {
         src.stop();
@@ -58,24 +117,27 @@ class SoundEngine {
       }
     });
     this.activeSfxSources.clear();
+    this.activeSfxGains.forEach((g) => {
+      try {
+        g.gain.cancelScheduledValues(0);
+        g.gain.setValueAtTime(0.0001, this.ctx?.currentTime ?? 0);
+        g.disconnect();
+      } catch {
+        // already disconnected
+      }
+    });
+    this.activeSfxGains.clear();
   }
 
-  public scheduleBgDuckIntervals(
-    ctx: AudioContext,
-    intervals: Array<{ start: number; end: number }>,
-    audioStartTime: number,
-    duckRatio = 0.22
-  ): void {
-    const bgEntry = this.bgNodes.get(ctx);
-    if (!bgEntry || bgEntry.baseVolume <= 0.001 || intervals.length === 0) return;
-
-    // Sort and merge overlapping/adjacent intervals within 0.18s so ramps never collide
+  private mergeDuckIntervals(
+    intervals: Array<{ start: number; end: number }>
+  ): Array<{ start: number; end: number }> {
     const sorted = [...intervals]
-      .filter((iv) => iv.end > iv.start + 0.05)
+      .filter((iv) => Number.isFinite(iv.start) && Number.isFinite(iv.end) && iv.end > iv.start + 0.05)
       .sort((a, b) => a.start - b.start);
-    if (sorted.length === 0) return;
+    if (sorted.length === 0) return [];
 
-    const merged: Array<{ start: number; end: number }> = [sorted[0]];
+    const merged: Array<{ start: number; end: number }> = [{ ...sorted[0] }];
     for (let i = 1; i < sorted.length; i++) {
       const prev = merged[merged.length - 1];
       const curr = sorted[i];
@@ -85,22 +147,45 @@ class SoundEngine {
         merged.push({ ...curr });
       }
     }
+    return merged;
+  }
+
+  public scheduleBgDuckIntervals(
+    ctx: BaseAudioContext,
+    intervals: Array<{ start: number; end: number }>,
+    audioStartTime: number,
+    duckRatio = 0.22,
+    maxAbsoluteEnd?: number
+  ): void {
+    const bgEntry = this.bgNodes.get(ctx);
+    if (!bgEntry || bgEntry.baseVolume <= 0.001 || intervals.length === 0) return;
+
+    const merged = this.mergeDuckIntervals(intervals);
+    if (merged.length === 0) return;
 
     const gainParam = bgEntry.gain.gain;
     const base = bgEntry.baseVolume;
     const target = Math.max(0.01, base * Math.max(0.05, Math.min(0.8, duckRatio)));
+    const hardLimit = maxAbsoluteEnd ?? Infinity;
 
     try {
       gainParam.cancelScheduledValues(audioStartTime);
       gainParam.setValueAtTime(base, audioStartTime);
+      let lastScheduledTime = audioStartTime;
       for (const iv of merged) {
-        const tStart = Math.max(ctx.currentTime, audioStartTime + iv.start);
-        const tEnd = Math.max(tStart + 0.1, audioStartTime + iv.end);
-        const fadeDownStart = Math.max(audioStartTime, tStart - 0.06);
+        const tStart = Math.max(lastScheduledTime + 0.01, ctx.currentTime, audioStartTime + iv.start);
+        if (tStart >= hardLimit - 0.08) break;
+        const tEnd = Math.min(hardLimit - 0.04, Math.max(tStart + 0.08, audioStartTime + iv.end));
+        const fadeDownStart = Math.max(lastScheduledTime + 0.005, tStart - 0.05);
+        const rampDownAt = Math.max(fadeDownStart + 0.01, tStart + 0.04);
+        const holdUntil = Math.max(rampDownAt + 0.01, tEnd - 0.04);
+        const recoverAt = Math.min(hardLimit, holdUntil + 0.2);
+
         gainParam.setValueAtTime(base, fadeDownStart);
-        gainParam.linearRampToValueAtTime(target, tStart + 0.04);
-        gainParam.setValueAtTime(target, Math.max(tStart + 0.05, tEnd - 0.04));
-        gainParam.linearRampToValueAtTime(base, tEnd + 0.22);
+        gainParam.linearRampToValueAtTime(target, rampDownAt);
+        gainParam.setValueAtTime(target, holdUntil);
+        gainParam.linearRampToValueAtTime(base, recoverAt);
+        lastScheduledTime = recoverAt;
       }
     } catch {
       // ignore scheduling errors
@@ -108,7 +193,7 @@ class SoundEngine {
   }
 
   public duckBgMusic(
-    ctxOverride: AudioContext | undefined,
+    ctxOverride: BaseAudioContext | undefined,
     speechDurationSec: number,
     duckRatio = 0.22
   ): void {
@@ -191,7 +276,10 @@ class SoundEngine {
     return 0;
   }
 
-  public async decodeDataUrl(dataUrl: string, targetCtx?: AudioContext): Promise<AudioBuffer | null> {
+  public async decodeDataUrl(
+    dataUrl: string,
+    targetCtx?: BaseAudioContext
+  ): Promise<AudioBuffer | null> {
     const ctx = targetCtx ?? this.getContext();
     const cache = this.getCacheForContext(ctx);
     const cacheKey = this.getDataUrlKey(dataUrl);
@@ -221,7 +309,7 @@ class SoundEngine {
   public async preloadAllAudio(
     audio: AudioSettings,
     slides: QuestionSlide[] = [],
-    targetCtx?: AudioContext,
+    targetCtx?: BaseAudioContext,
     template?: TemplateSettings
   ): Promise<void> {
     const slots: AudioSlotId[] = [
@@ -264,7 +352,7 @@ class SoundEngine {
     slides: QuestionSlide[],
     audio: AudioSettings,
     template: TemplateSettings,
-    targetCtx?: AudioContext
+    targetCtx?: BaseAudioContext
   ): Promise<{ slides: QuestionSlide[]; audio: AudioSettings; template: TemplateSettings }> {
     await this.preloadAllAudio(audio, slides, targetCtx, template);
 
@@ -331,51 +419,75 @@ class SoundEngine {
     };
   }
 
+  private scheduleBufferWithEnvelope(
+    ctx: BaseAudioContext,
+    buffer: AudioBuffer,
+    volume: number,
+    destination: AudioNode,
+    startTime: number,
+    maxEndTime?: number,
+    trackChannel?: 'sfx' | 'voice'
+  ): void {
+    const start = Math.max(ctx.currentTime, startTime);
+    const naturalEnd = start + buffer.duration;
+    const clampedEnd =
+      maxEndTime !== undefined ? Math.min(naturalEnd, Math.max(start + 0.03, maxEndTime)) : naturalEnd;
+    if (clampedEnd <= start + 0.015) return;
+
+    const src = ctx.createBufferSource();
+    src.buffer = buffer;
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(volume, start);
+
+    // Smooth micro fade-out when truncated before buffer's natural end so clicks/bleed never occur
+    if (maxEndTime !== undefined && clampedEnd < naturalEnd - 0.01) {
+      const fadeDur = Math.min(0.035, (clampedEnd - start) * 0.4);
+      const fadeStart = Math.max(start, clampedEnd - fadeDur);
+      gain.gain.setValueAtTime(volume, fadeStart);
+      gain.gain.linearRampToValueAtTime(0.0001, clampedEnd);
+    }
+
+    src.connect(gain);
+    gain.connect(destination);
+    if (trackChannel) {
+      this.trackSourceIfPreview(ctx, src, trackChannel, gain);
+    }
+    src.start(start);
+    if (clampedEnd < naturalEnd + 0.02) {
+      src.stop(clampedEnd + 0.005);
+    }
+  }
+
   public async playClip(
     clip: SlideAudioClip,
     volume = 1,
     destination?: AudioNode,
-    ctxOverride?: AudioContext,
-    when?: number
+    ctxOverride?: BaseAudioContext,
+    when?: number,
+    channel: 'voice' | 'sfx' = 'voice',
+    maxDurationSec?: number
   ): Promise<void> {
     if (volume <= 0.001 || !clip.dataUrl) return;
     const ctx = ctxOverride ?? this.getContext();
     const dest = destination ?? ctx.destination;
     const cache = this.getCacheForContext(ctx);
     const cached = cache.get(this.getDataUrlKey(clip.dataUrl));
-
-    if (cached) {
-      const startTime = Math.max(ctx.currentTime, when ?? ctx.currentTime);
-      const src = ctx.createBufferSource();
-      src.buffer = cached;
-      const gain = ctx.createGain();
-      gain.gain.setValueAtTime(volume, startTime);
-      src.connect(gain);
-      gain.connect(dest);
-      this.trackSourceIfPreview(ctx, src);
-      src.start(startTime);
-      return;
-    }
-
-    const buffer = await this.decodeDataUrl(clip.dataUrl, ctx);
+    const buffer = cached ?? (await this.decodeDataUrl(clip.dataUrl, ctx));
     if (!buffer) return;
+
     const startTime = Math.max(ctx.currentTime, when ?? ctx.currentTime);
-    const src = ctx.createBufferSource();
-    src.buffer = buffer;
-    const gain = ctx.createGain();
-    gain.gain.setValueAtTime(volume, startTime);
-    src.connect(gain);
-    gain.connect(dest);
-    this.trackSourceIfPreview(ctx, src);
-    src.start(startTime);
+    const maxEnd = maxDurationSec !== undefined ? startTime + maxDurationSec : undefined;
+    this.scheduleBufferWithEnvelope(ctx, buffer, volume, dest, startTime, maxEnd, channel);
   }
 
   public async playSlot(
     config: AudioSlotConfig,
     destination?: AudioNode,
-    ctxOverride?: AudioContext,
+    ctxOverride?: BaseAudioContext,
     when?: number,
-    urgent = false
+    urgent = false,
+    maxDurationSec?: number,
+    suspenseDurationSec?: number
   ): Promise<void> {
     if (!config || config.volume <= 0.001) return;
     const ctx = ctxOverride ?? this.getContext();
@@ -387,26 +499,29 @@ class SoundEngine {
       const buffer = cached ?? (await this.decodeDataUrl(config.customDataUrl, ctx));
       if (buffer) {
         const startTime = Math.max(ctx.currentTime, when ?? ctx.currentTime);
-        const src = ctx.createBufferSource();
-        src.buffer = buffer;
-        const gain = ctx.createGain();
-        gain.gain.setValueAtTime(config.volume, startTime);
-        src.connect(gain);
-        gain.connect(dest);
-        this.trackSourceIfPreview(ctx, src);
-        src.start(startTime);
+        const maxEnd = maxDurationSec !== undefined ? startTime + maxDurationSec : undefined;
+        this.scheduleBufferWithEnvelope(ctx, buffer, config.volume, dest, startTime, maxEnd, 'sfx');
         return;
       }
     }
 
     const startTime = Math.max(ctx.currentTime, when ?? ctx.currentTime);
-    this.playBuiltInSfx(config.builtinId, config.volume, ctx, dest, startTime, urgent);
+    this.playBuiltInSfx(
+      config.builtinId,
+      config.volume,
+      ctx,
+      dest,
+      startTime,
+      urgent,
+      suspenseDurationSec,
+      maxDurationSec
+    );
   }
 
   public async startBgMusic(
     config: AudioSlotConfig,
     destination?: AudioNode,
-    ctxOverride?: AudioContext
+    ctxOverride?: BaseAudioContext
   ): Promise<AudioBufferSourceNode | null> {
     this.stopBgMusic();
     if (!config || config.volume <= 0.001) return null;
@@ -460,12 +575,40 @@ class SoundEngine {
   public playBuiltInSfx(
     id: BuiltInSfxId,
     volume: number,
-    ctx: AudioContext,
+    ctx: BaseAudioContext,
     dest: AudioNode,
     now: number,
-    urgent = false
+    urgent = false,
+    suspenseDurationSec = 1.6,
+    maxDurationSec?: number
   ): void {
     if (id === 'none' || volume <= 0.001) return;
+
+    // Route through a dedicated envelope gate when bounded OR in preview so nothing bleeds past phase boundary
+    let targetDest: AudioNode = dest;
+    if (maxDurationSec !== undefined || ctx === this.ctx) {
+      const gate = ctx.createGain();
+      gate.gain.setValueAtTime(1, now);
+      if (maxDurationSec !== undefined && Number.isFinite(maxDurationSec)) {
+        const safeMax = Math.max(0.05, maxDurationSec);
+        const fadeStart = Math.max(now, now + safeMax - Math.min(0.035, safeMax * 0.3));
+        gate.gain.setValueAtTime(1, fadeStart);
+        gate.gain.linearRampToValueAtTime(0.0001, now + safeMax);
+      }
+      gate.connect(dest);
+      targetDest = gate;
+      if (ctx === this.ctx) {
+        this.activeSfxGains.add(gate);
+        window.setTimeout(() => {
+          this.activeSfxGains.delete(gate);
+          try {
+            gate.disconnect();
+          } catch {
+            // ignore
+          }
+        }, Math.ceil((maxDurationSec ?? 1.8) * 1000) + 120);
+      }
+    }
 
     switch (id) {
       case 'softPop': {
@@ -478,7 +621,7 @@ class SoundEngine {
         gain.gain.linearRampToValueAtTime(volume * 0.36, now + 0.012);
         gain.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
         osc.connect(gain);
-        gain.connect(dest);
+        gain.connect(targetDest);
         osc.start(now);
         osc.stop(now + 0.16);
         break;
@@ -493,7 +636,7 @@ class SoundEngine {
         gain.gain.setValueAtTime(volume * 0.5, now);
         gain.gain.exponentialRampToValueAtTime(0.001, now + 0.06);
         osc.connect(gain);
-        gain.connect(dest);
+        gain.connect(targetDest);
         osc.start(now);
         osc.stop(now + 0.07);
         break;
@@ -508,7 +651,7 @@ class SoundEngine {
         gain.gain.exponentialRampToValueAtTime(volume * 0.18, now + 0.008);
         gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.07);
         osc.connect(gain);
-        gain.connect(dest);
+        gain.connect(targetDest);
         osc.start(now);
         osc.stop(now + 0.085);
         break;
@@ -523,29 +666,33 @@ class SoundEngine {
         gain.gain.setValueAtTime(volume * 0.32, now);
         gain.gain.exponentialRampToValueAtTime(0.001, now + 0.045);
         osc.connect(gain);
-        gain.connect(dest);
+        gain.connect(targetDest);
         osc.start(now);
         osc.stop(now + 0.055);
         break;
       }
 
       case 'suspenseRiser': {
-        // Rising sawtooth tension + 6 low heartbeat pulses (matches channel HTML suspense())
+        const susDur = Math.max(0.35, Math.min(4.0, suspenseDurationSec || 1.6));
+        const endT = now + Math.max(0.28, susDur - 0.04);
         const riser = ctx.createOscillator();
         const riserGain = ctx.createGain();
         riser.type = 'sawtooth';
         riser.frequency.setValueAtTime(180, now);
-        riser.frequency.exponentialRampToValueAtTime(900, now + 1.5);
+        riser.frequency.exponentialRampToValueAtTime(900, endT);
         riserGain.gain.setValueAtTime(0.0001, now);
         riserGain.gain.exponentialRampToValueAtTime(volume * 0.16, now + 0.04);
-        riserGain.gain.exponentialRampToValueAtTime(0.0001, now + 1.5);
+        riserGain.gain.setValueAtTime(volume * 0.14, Math.max(now + 0.06, endT - 0.08));
+        riserGain.gain.exponentialRampToValueAtTime(0.0001, endT);
         riser.connect(riserGain);
-        riserGain.connect(dest);
+        riserGain.connect(targetDest);
         riser.start(now);
-        riser.stop(now + 1.52);
+        riser.stop(endT + 0.02);
 
-        for (let k = 0; k < 6; k++) {
+        const pulseCount = Math.max(2, Math.floor((susDur - 0.08) / 0.25));
+        for (let k = 0; k < pulseCount; k++) {
           const t = now + k * 0.25;
+          if (t + 0.17 > endT) break;
           const thump = ctx.createOscillator();
           const thumpGain = ctx.createGain();
           thump.type = 'sine';
@@ -554,7 +701,7 @@ class SoundEngine {
           thumpGain.gain.exponentialRampToValueAtTime(volume * 0.42, t + 0.015);
           thumpGain.gain.exponentialRampToValueAtTime(0.0001, t + 0.15);
           thump.connect(thumpGain);
-          thumpGain.connect(dest);
+          thumpGain.connect(targetDest);
           thump.start(t);
           thump.stop(t + 0.17);
         }
@@ -585,7 +732,7 @@ class SoundEngine {
 
         noise.connect(filter);
         filter.connect(gain);
-        gain.connect(dest);
+        gain.connect(targetDest);
         noise.start(now);
         noise.stop(now + 0.29);
         break;
@@ -603,7 +750,7 @@ class SoundEngine {
           gain.gain.linearRampToValueAtTime(volume * 0.35, t + 0.015);
           gain.gain.exponentialRampToValueAtTime(0.001, t + 0.38);
           osc.connect(gain);
-          gain.connect(dest);
+          gain.connect(targetDest);
           osc.start(t);
           osc.stop(t + 0.4);
         });
@@ -622,7 +769,7 @@ class SoundEngine {
           gain.gain.linearRampToValueAtTime(volume * 0.32, t + 0.018);
           gain.gain.exponentialRampToValueAtTime(0.001, t + (idx === 3 ? 0.55 : 0.38));
           osc.connect(gain);
-          gain.connect(dest);
+          gain.connect(targetDest);
           osc.start(t);
           osc.stop(t + 0.58);
         });
@@ -640,13 +787,322 @@ class SoundEngine {
           gain.gain.linearRampToValueAtTime(volume * 0.2, now + 0.05);
           gain.gain.exponentialRampToValueAtTime(0.001, now + 0.45);
           osc.connect(gain);
-          gain.connect(dest);
+          gain.connect(targetDest);
           osc.start(now);
           osc.stop(now + 0.48);
         });
         break;
       }
     }
+  }
+
+  /**
+   * Sample-accurate offline mixdown for video export.
+   * Eliminates timer drift and prevents voiceovers, countdown ticks, suspense,
+   * reveal chimes, and background music from colliding or bleeding across phases.
+   */
+  public async renderOfflineExportMix(
+    slides: QuestionSlide[],
+    template: TemplateSettings,
+    timing: TimingSettings,
+    audio: AudioSettings,
+    sampleRate = 48000
+  ): Promise<RenderedExportAudio | null> {
+    if (typeof OfflineAudioContext === 'undefined') {
+      return null;
+    }
+
+    const totalDuration = Math.max(0.5, getTotalDuration(slides, timing, audio, template));
+    const totalSamples = Math.ceil((totalDuration + 0.15) * sampleRate);
+    const offline = new OfflineAudioContext(2, totalSamples, sampleRate);
+
+    // Master Limiter prevents transient summing distortion when SFX + music coincide
+    const limiter = offline.createDynamicsCompressor();
+    limiter.threshold.setValueAtTime(-3, 0);
+    limiter.knee.setValueAtTime(6, 0);
+    limiter.ratio.setValueAtTime(8, 0);
+    limiter.attack.setValueAtTime(0.003, 0);
+    limiter.release.setValueAtTime(0.12, 0);
+    limiter.connect(offline.destination);
+
+    // Decode all custom clips directly inside OfflineAudioContext (auto-resamples cleanly)
+    await this.preloadAllAudio(audio, slides, offline, template);
+    const cache = this.getCacheForContext(offline);
+    const lookupBuf = (dataUrl?: string): AudioBuffer | null => {
+      if (!dataUrl) return null;
+      return cache.get(this.getDataUrlKey(dataUrl)) ?? null;
+    };
+
+    const schedules = computeProjectTimeline(slides, timing, audio, template);
+    const voiceQueue: ScheduledVoiceItem[] = [];
+    const speechIntervals: Array<{ start: number; end: number }> = [];
+
+    const introDur = getIntroHookDuration(template, timing);
+    if (introDur > 0 && slides.length > 0) {
+      const endBound = Math.min(totalDuration, schedules[0]?.startTime ?? introDur);
+      const hookSfx = template.introHookSfx ?? 'whoosh';
+      const hookBuf = lookupBuf(template.introHookAudio?.dataUrl);
+      if (hookSfx && hookSfx !== 'none' && !hookBuf) {
+        this.playBuiltInSfx(
+          hookSfx,
+          0.72,
+          offline,
+          limiter,
+          0,
+          false,
+          1.6,
+          Math.max(0.15, endBound - 0.02)
+        );
+      }
+      if (hookBuf) {
+        if (hookSfx && hookSfx !== 'none') {
+          this.playBuiltInSfx(hookSfx, 0.42, offline, limiter, 0, false, 1.6, Math.min(0.28, endBound - 0.02));
+        }
+        voiceQueue.push({
+          start: 0,
+          buffer: hookBuf,
+          volume: 1,
+          maxEnd: endBound - 0.02,
+        });
+      }
+    }
+
+    const urgentThreshold = Math.max(1, Math.min(10, template?.timerUrgentThreshold ?? 3));
+
+    for (let idx = 0; idx < schedules.length; idx++) {
+      const sched = schedules[idx];
+      const slide = slides[sched.slideIndex];
+      const base = sched.startTime;
+      const nextSlideStart =
+        idx < schedules.length - 1 ? schedules[idx + 1].startTime : totalDuration;
+
+      const tQ = base + sched.tQuestionStart;
+      const opt0Time = base + sched.tOptionStarts[0];
+      const tThink = base + sched.tThinkingStart;
+      const tSus = base + sched.tSuspenseStart;
+      const tReveal = base + sched.tRevealStart;
+
+      // 1. Question enter: monophonic voiceover (bounded before countdown ticks!) OR short SFX
+      const qBuf = lookupBuf(slide?.voiceover?.question?.dataUrl);
+      const optCount = slide?.slideType === 'trueFalse' ? 2 : 4;
+      const hasAnyOptVoice = Array.from({ length: optCount }).some((_, oi) =>
+        Boolean(lookupBuf(slide?.voiceover?.options?.[oi]?.dataUrl))
+      );
+      if (qBuf) {
+        const qBound = hasAnyOptVoice
+          ? Math.max(tQ + 0.15, opt0Time - 0.02)
+          : Math.max(tQ + 0.15, tThink - 0.03);
+        voiceQueue.push({
+          start: tQ,
+          buffer: qBuf,
+          volume: 1,
+          maxEnd: Math.min(nextSlideStart - 0.02, qBound),
+        });
+      } else {
+        this.scheduleSlotInOffline(
+          offline,
+          limiter,
+          audio.questionEnter,
+          lookupBuf(audio.questionEnter.customDataUrl),
+          tQ,
+          Math.max(tQ + 0.15, opt0Time - 0.02),
+          false,
+          timing.suspenseDuration
+        );
+      }
+
+      // 2. Options enter: strictly non-overlapping voiceover per option OR short SFX
+      let optVoiceCursor = opt0Time;
+      for (let oIdx = 0; oIdx < optCount; oIdx++) {
+        const tOpt = base + sched.tOptionStarts[oIdx];
+        const sameAsPrev =
+          oIdx > 0 && Math.abs(sched.tOptionStarts[oIdx] - sched.tOptionStarts[oIdx - 1]) < 0.01;
+        // Find the next distinct phase/row start strictly after tOpt (fixes rowByRow where opt 0 & 1 share t0)
+        let groupEndBoundary = tThink;
+        for (let k = oIdx + 1; k < optCount; k++) {
+          const cand = base + sched.tOptionStarts[k];
+          if (cand > tOpt + 0.01) {
+            groupEndBoundary = cand;
+            break;
+          }
+        }
+        const oBuf = lookupBuf(slide?.voiceover?.options?.[oIdx]?.dataUrl);
+        if (oBuf) {
+          const actualStart = Math.max(tOpt, optVoiceCursor);
+          const maxBound = Math.min(
+            nextSlideStart - 0.03,
+            Math.max(actualStart + 0.15, groupEndBoundary - 0.02)
+          );
+          if (actualStart < maxBound - 0.04) {
+            voiceQueue.push({
+              start: actualStart,
+              buffer: oBuf,
+              volume: 1,
+              maxEnd: maxBound,
+            });
+            optVoiceCursor = Math.min(maxBound, actualStart + oBuf.duration + 0.04);
+          }
+        } else if (!sameAsPrev) {
+          this.scheduleSlotInOffline(
+            offline,
+            limiter,
+            audio.optionEnter,
+            lookupBuf(audio.optionEnter.customDataUrl),
+            tOpt,
+            Math.max(tOpt + 0.15, groupEndBoundary - 0.02),
+            false,
+            timing.suspenseDuration
+          );
+        }
+      }
+
+      // 3. Countdown ticks: strictly bounded so ticks never overlap each other or bleed into suspense
+      const totalTicks = Math.floor(timing.thinkingDuration);
+      const tickBuf = lookupBuf(audio.countdownTick.customDataUrl);
+      for (let sec = 0; sec < totalTicks; sec++) {
+        const tTick = tThink + sec;
+        const tickSecond = totalTicks - sec;
+        const nextTickOrSus = Math.min(tTick + 0.88, tSus - 0.02);
+        this.scheduleSlotInOffline(
+          offline,
+          limiter,
+          audio.countdownTick,
+          tickBuf,
+          tTick,
+          Math.max(tTick + 0.08, nextTickOrSus),
+          tickSecond <= urgentThreshold,
+          timing.suspenseDuration
+        );
+      }
+
+      // 4. Suspense: duration-matched synth OR custom clip trimmed cleanly before reveal
+      const susDur = Math.max(0, timing.suspenseDuration ?? 0);
+      if (susDur > 0) {
+        this.scheduleSlotInOffline(
+          offline,
+          limiter,
+          audio.suspense,
+          lookupBuf(audio.suspense.customDataUrl),
+          tSus,
+          Math.max(tSus + 0.15, tReveal - 0.02),
+          false,
+          susDur
+        );
+      }
+
+      // 5. Correct Answer Reveal: voiceover OR fanfare, strictly bounded before next slide
+      const ansBuf = lookupBuf(slide?.voiceover?.answer?.dataUrl);
+      if (ansBuf) {
+        voiceQueue.push({
+          start: tReveal,
+          buffer: ansBuf,
+          volume: 1,
+          maxEnd: Math.min(totalDuration, nextSlideStart - 0.02),
+        });
+      } else {
+        this.scheduleSlotInOffline(
+          offline,
+          limiter,
+          audio.correctReveal,
+          lookupBuf(audio.correctReveal.customDataUrl),
+          tReveal,
+          Math.min(totalDuration, nextSlideStart - 0.03),
+          false,
+          susDur
+        );
+      }
+    }
+
+    // Enforce strictly monophonic non-overlapping Voice bus across the whole video
+    voiceQueue.sort((a, b) => a.start - b.start);
+    for (let i = 0; i < voiceQueue.length; i++) {
+      const curr = voiceQueue[i];
+      const nextVoice = voiceQueue[i + 1];
+      const hardEnd = nextVoice
+        ? Math.min(curr.maxEnd, Math.max(curr.start + 0.04, nextVoice.start - 0.02))
+        : curr.maxEnd;
+      const effectiveEnd = Math.min(curr.start + curr.buffer.duration, hardEnd);
+      if (effectiveEnd > curr.start + 0.04) {
+        this.scheduleBufferWithEnvelope(
+          offline,
+          curr.buffer,
+          curr.volume,
+          limiter,
+          curr.start,
+          effectiveEnd
+        );
+        if (effectiveEnd - curr.start > 0.2) {
+          speechIntervals.push({ start: curr.start, end: effectiveEnd });
+        }
+      }
+    }
+
+    // Schedule looping Background Music with clean start/end fades + merged Auto-Ducking
+    const bgCfg = audio.bgMusic;
+    if (bgCfg && bgCfg.volume > 0.001 && bgCfg.sourceType === 'custom' && bgCfg.customDataUrl) {
+      const bgBuf = lookupBuf(bgCfg.customDataUrl);
+      if (bgBuf) {
+        const bgSrc = offline.createBufferSource();
+        bgSrc.buffer = bgBuf;
+        bgSrc.loop = true;
+
+        const bgGain = offline.createGain();
+        const baseVol = bgCfg.volume;
+        const tailStart = Math.max(0.25, totalDuration - 0.45);
+        bgGain.gain.setValueAtTime(0.0001, 0);
+        bgGain.gain.linearRampToValueAtTime(baseVol, Math.min(0.18, totalDuration * 0.2));
+
+        bgSrc.connect(bgGain);
+        bgGain.connect(limiter);
+        this.bgNodes.set(offline, { gain: bgGain, baseVolume: baseVol });
+
+        if (timing.autoDuckMusic !== false && speechIntervals.length > 0) {
+          this.scheduleBgDuckIntervals(
+            offline,
+            speechIntervals,
+            0,
+            timing.bgMusicDuckRatio ?? 0.22,
+            tailStart - 0.02
+          );
+        }
+
+        bgGain.gain.setValueAtTime(baseVol, tailStart);
+        bgGain.gain.linearRampToValueAtTime(0.0001, totalDuration + 0.05);
+
+        bgSrc.start(0);
+        bgSrc.stop(totalDuration + 0.08);
+      }
+    }
+
+    const rendered = await offline.startRendering();
+    return { buffer: rendered, speechIntervals };
+  }
+
+  private scheduleSlotInOffline(
+    ctx: BaseAudioContext,
+    dest: AudioNode,
+    config: AudioSlotConfig,
+    customBuffer: AudioBuffer | null,
+    when: number,
+    maxEndTime: number,
+    urgent: boolean,
+    suspenseDurationSec: number
+  ): void {
+    if (!config || config.volume <= 0.001) return;
+    if (config.sourceType === 'custom' && customBuffer) {
+      this.scheduleBufferWithEnvelope(ctx, customBuffer, config.volume, dest, when, maxEndTime);
+      return;
+    }
+    this.playBuiltInSfx(
+      config.builtinId,
+      config.volume,
+      ctx,
+      dest,
+      when,
+      urgent,
+      suspenseDurationSec,
+      Math.max(0.06, maxEndTime - when)
+    );
   }
 }
 

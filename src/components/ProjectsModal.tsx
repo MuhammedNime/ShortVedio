@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
-import { Copy, FolderOpen, Plus, Trash2, X } from 'lucide-react';
+import { Copy, FolderOpen, Plus, Star, Trash2, X } from 'lucide-react';
+import { CustomTemplatePreset, getDefaultCustomPreset } from '../storage/customPresets';
 import {
   ProjectSummary,
   deleteProjectFromStore,
@@ -7,7 +8,7 @@ import {
   loadProjectById,
   saveProjectToStore,
 } from '../storage/projectStore';
-import { QuizProject, createDefaultProject } from '../types/quiz';
+import { DEFAULT_TEMPLATE, QuizProject, createDefaultProject } from '../types/quiz';
 
 interface ProjectsModalProps {
   isOpen: boolean;
@@ -26,10 +27,12 @@ export const ProjectsModal: React.FC<ProjectsModalProps> = ({
 }) => {
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [editingName, setEditingName] = useState(currentProject.name);
+  const [defaultPreset, setDefaultPreset] = useState<CustomTemplatePreset | null>(null);
 
   useEffect(() => {
     if (!isOpen) return;
     setEditingName(currentProject.name);
+    void getDefaultCustomPreset().then(setDefaultPreset);
     void saveProjectToStore(currentProject).then(() => {
       void listProjectsFromStore().then(setProjects);
     });
@@ -41,6 +44,16 @@ export const ProjectsModal: React.FC<ProjectsModalProps> = ({
     const fresh = createDefaultProject();
     fresh.id = `proj-${Date.now()}`;
     fresh.name = `مشروع جديد ${projects.length + 1}`;
+    const customDef = defaultPreset ?? (await getDefaultCustomPreset());
+    if (customDef) {
+      fresh.template = {
+        ...DEFAULT_TEMPLATE,
+        ...customDef.template,
+      };
+      if (customDef.timing) {
+        fresh.timing = { ...customDef.timing };
+      }
+    }
     await saveProjectToStore(fresh);
     onSelectProject(fresh);
     onClose();
@@ -113,6 +126,15 @@ export const ProjectsModal: React.FC<ProjectsModalProps> = ({
               />
             </div>
           </div>
+
+          {defaultPreset && (
+            <div className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-[var(--gold)]/10 border border-[var(--gold)]/35 text-[11px] text-[var(--gold)] font-semibold">
+              <Star className="w-3.5 h-3.5 fill-current shrink-0" />
+              <span>
+                أي مشروع جديد سيبدأ بستايلك الافتراضي: «{defaultPreset.name}»
+              </span>
+            </div>
+          )}
 
           {/* Quick Actions */}
           <div className="grid grid-cols-2 gap-2">

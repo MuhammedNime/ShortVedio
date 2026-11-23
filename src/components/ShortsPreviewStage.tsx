@@ -1,11 +1,16 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   Camera,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
+  ChevronUp,
   Eye,
   EyeOff,
+  Maximize2,
+  Minimize2,
   Monitor,
+  Move,
   Palette,
   Pause,
   Play,
@@ -18,7 +23,11 @@ import {
 import { soundEngine } from '../audio/soundEngine';
 import { saveOrDownloadBlob } from '../utils/nativeDownload';
 import {
+  DragTargetId,
+  StageElementHitbox,
+  clearRendererCaches,
   collectSoundEventsInInterval,
+  ensureQuizFontsLoaded,
   exportThumbnailJpg,
   getSlideTimeInfo,
   preloadTemplateBackground,
@@ -32,6 +41,7 @@ import {
   TimingSettings,
   computeProjectTimeline,
   getCanvasDimensions,
+  getIntroHookDuration,
   getSlidesContentDuration,
   getTotalDuration,
 } from '../types/quiz';
@@ -43,10 +53,13 @@ interface ShortsPreviewStageProps {
   timing: TimingSettings;
   audio: AudioSettings;
   isExporting?: boolean;
+  mobileStageMode?: 'compact' | 'expanded' | 'collapsed';
+  onChangeMobileStageMode?: (mode: 'compact' | 'expanded' | 'collapsed') => void;
   onToggleSafeGuides: () => void;
   onToggleAspectRatio?: () => void;
   onCycleChannelTheme: () => void;
   onActiveSlideChange?: (idx: number) => void;
+  onUpdateTemplate?: (next: TemplateSettings) => void;
 }
 
 function formatTimecode(sec: number): string {
@@ -65,10 +78,13 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
   timing,
   audio,
   isExporting = false,
+  mobileStageMode = 'compact',
+  onChangeMobileStageMode,
   onToggleSafeGuides,
   onToggleAspectRatio,
   onCycleChannelTheme,
   onActiveSlideChange,
+  onUpdateTemplate,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const rangeInputRef = useRef<HTMLInputElement | null>(null);
@@ -78,6 +94,8 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
   const [hideControlsOverlay, setHideControlsOverlay] = useState(false);
   const [isCapturingThumb, setIsCapturingThumb] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
+  const [dragMode, setDragMode] = useState(false);
+  const [activeDragTarget, setActiveDragTarget] = useState<DragTargetId | null>(null);
 
   const { width: canvasW, height: canvasH } = getCanvasDimensions(template);
   const isWide = template.aspectRatio === '16:9';
@@ -86,15 +104,26 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
   const timeRef = useRef(0);
   const totalDurationRef = useRef(totalDuration);
   const hasUserScrubbedRef = useRef(false);
+  const hasInitializedTimeRef = useRef(false);
   const isExternallySelectedSlideRef = useRef(false);
   const isScrubSlideSyncRef = useRef(false);
   const forceFirstTickRef = useRef(false);
   const isPlayingRef = useRef(false);
   const isMutedRef = useRef(false);
+  const playSessionRef = useRef(0);
   const slidesRef = useRef(slides);
   const templateRef = useRef(template);
   const timingRef = useRef(timing);
   const audioRef = useRef(audio);
+  const dragModeRef = useRef(dragMode);
+  const activeDragTargetRef = useRef<DragTargetId | null>(activeDragTarget);
+  const hitboxesRef = useRef<StageElementHitbox[]>([]);
+  const dragSessionRef = useRef<{
+    target: DragTargetId;
+    startCanvasX: number;
+    startCanvasY: number;
+    startTemplate: TemplateSettings;
+  } | null>(null);
 
   slidesRef.current = slides;
   templateRef.current = template;
@@ -102,6 +131,33 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
   audioRef.current = audio;
   totalDurationRef.current = totalDuration;
   isMutedRef.current = isMuted;
+  dragModeRef.current = dragMode;
+  activeDragTargetRef.current = activeDragTarget;
+
+  const drawPreviewFrame = (
+    ctx: CanvasRenderingContext2D,
+    t: number,
+    s = slidesRef.current,
+    tpl = templateRef.current,
+    tm = timingRef.current,
+    au = audioRef.current
+  ) => {
+    const nextHitboxes: StageElementHitbox[] = [];
+    renderQuizFrame(
+      ctx,
+      t,
+      s,
+      tpl,
+      tm,
+      au,
+      true,
+      dragModeRef.current
+        ? { dragMode: true, activeTarget: activeDragTargetRef.current }
+        : undefined,
+      nextHitboxes
+    );
+    hitboxesRef.current = nextHitboxes;
+  };
 
   const syncTimeUi = (sec: number, dur = totalDurationRef.current, syncReact = true) => {
     timeRef.current = sec;
@@ -119,23 +175,49 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
   useEffect(() => {
     if (isExporting) {
       setIsPlaying(false);
+      setDragMode(false);
       soundEngine.stopBgMusic();
       soundEngine.stopAllSfxAndVoice();
     }
   }, [isExporting]);
 
   useEffect(() => {
+    let alive = true;
+    const redrawWithFreshFontCache = () => {
+      if (!alive) return;
+      clearRendererCaches();
+      const canvas = canvasRef.current;
+      const ctx = canvas?.getContext('2d', { alpha: false });
+      if (ctx) {
+        drawPreviewFrame(ctx, timeRef.current);
+      }
+    };
+
+    void ensureQuizFontsLoaded(template.fontFamily).then(redrawWithFreshFontCache);
+    if (typeof document !== 'undefined' && document.fonts) {
+      document.fonts.addEventListener('loadingdone', redrawWithFreshFontCache);
+    }
+    return () => {
+      alive = false;
+      if (typeof document !== 'undefined' && document.fonts) {
+        document.fonts.removeEventListener('loadingdone', redrawWithFreshFontCache);
+      }
+    };
+  }, [template.fontFamily]);
+
+  useEffect(() => {
     void Promise.all([preloadTemplateBackground(template, slides), preloadTimerVideo()]).then(() => {
       const canvas = canvasRef.current;
       const ctx = canvas?.getContext('2d', { alpha: false });
       if (ctx) {
-        renderQuizFrame(ctx, timeRef.current, slides, template, timing, audio, true);
+        drawPreviewFrame(ctx, timeRef.current, slides, template, timing, audio);
       }
     });
-  }, [template, slides, timing, audio, canvasW, canvasH]);
+  }, [template, slides, timing, audio, canvasW, canvasH, dragMode, activeDragTarget]);
 
   useEffect(() => {
-    if (!hasUserScrubbedRef.current && !isPlayingRef.current) {
+    if (!hasInitializedTimeRef.current && !hasUserScrubbedRef.current && !isPlayingRef.current) {
+      hasInitializedTimeRef.current = true;
       const schedules = computeProjectTimeline(slides, timing, audio, template);
       const sched = schedules[activeSlideIndex] ?? schedules[0];
       if (sched) {
@@ -155,9 +237,9 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
     const canvas = canvasRef.current;
     const ctx = canvas?.getContext('2d', { alpha: false });
     if (ctx) {
-      renderQuizFrame(ctx, timeRef.current, slides, template, timing, audio, true);
+      drawPreviewFrame(ctx, timeRef.current, slides, template, timing, audio);
     }
-  }, [slides, template, timing, audio, totalDuration, canvasW, canvasH]);
+  }, [slides, template, timing, audio, totalDuration, canvasW, canvasH, dragMode, activeDragTarget]);
 
   const prevSlideIdxRef = useRef(activeSlideIndex);
   useEffect(() => {
@@ -166,7 +248,6 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
         isScrubSlideSyncRef.current = false;
       } else {
         isExternallySelectedSlideRef.current = true;
-        hasUserScrubbedRef.current = false;
         const schedules = computeProjectTimeline(slides, timing, audio, template);
         const sched = schedules[activeSlideIndex];
         const target = sched
@@ -177,7 +258,7 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
         const canvas = canvasRef.current;
         const ctx = canvas?.getContext('2d', { alpha: false });
         if (ctx) {
-          renderQuizFrame(ctx, clamped, slides, template, timing, audio, true);
+          drawPreviewFrame(ctx, clamped, slides, template, timing, audio);
         }
       }
     }
@@ -186,6 +267,8 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
 
   useEffect(() => {
     isPlayingRef.current = isPlaying;
+    const sessionId = ++playSessionRef.current;
+
     if (!isPlaying) {
       soundEngine.stopBgMusic();
       soundEngine.stopAllSfxAndVoice();
@@ -193,34 +276,41 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
     }
 
     let canceled = false;
+    const isStale = () => canceled || !isPlayingRef.current || playSessionRef.current !== sessionId;
 
     const startPlayback = async () => {
       let activeSlides = slidesRef.current;
       let activeAudio = audioRef.current;
       let activeTemplate = templateRef.current;
 
+      const synced = await soundEngine.syncProjectAudioDurations(
+        slidesRef.current,
+        audioRef.current,
+        templateRef.current
+      );
+      if (isStale()) return;
+      activeSlides = synced.slides;
+      activeAudio = synced.audio;
+      activeTemplate = synced.template;
+
       if (!isMutedRef.current) {
-        const synced = await soundEngine.syncProjectAudioDurations(
-          slidesRef.current,
-          audioRef.current,
-          templateRef.current
-        );
-        if (canceled || !isPlayingRef.current) return;
-        activeSlides = synced.slides;
-        activeAudio = synced.audio;
-        activeTemplate = synced.template;
-        void soundEngine.startBgMusic(activeAudio.bgMusic);
+        void soundEngine.startBgMusic(activeAudio.bgMusic).then((src) => {
+          if (isStale() && src) {
+            soundEngine.stopBgMusic();
+          }
+        });
       }
 
+      if (isStale()) return;
+
       let rafId = 0;
-      let lastPerf = performance.now();
-      let lastUiSyncPerf = lastPerf;
+      const startMediaTime = timeRef.current;
+      const startPerfMs = performance.now();
+      let lastUiSyncPerf = startPerfMs;
       let isFirstTick = true;
 
       const tick = (now: number) => {
-        if (canceled || !isPlayingRef.current) return;
-        const dt = Math.min(0.1, (now - lastPerf) / 1000);
-        lastPerf = now;
+        if (isStale()) return;
 
         const useSynced = activeSlides.length === slidesRef.current.length;
         const curSlides = useSynced ? activeSlides : slidesRef.current;
@@ -234,7 +324,7 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
         isFirstTick = false;
         forceFirstTickRef.current = false;
 
-        let nextT = rawPrevT + dt;
+        let nextT = startMediaTime + Math.max(0, (now - startPerfMs) / 1000);
         const maxDur = getTotalDuration(curSlides, timingRef.current, curAudio, curTemplate);
 
         if (nextT >= maxDur) {
@@ -243,15 +333,7 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
           const canvas = canvasRef.current;
           const ctx = canvas?.getContext('2d', { alpha: false });
           if (ctx) {
-            renderQuizFrame(
-              ctx,
-              nextT,
-              curSlides,
-              curTemplate,
-              timingRef.current,
-              curAudio,
-              true
-            );
+            drawPreviewFrame(ctx, nextT, curSlides, curTemplate, timingRef.current, curAudio);
           }
           setIsPlaying(false);
           soundEngine.stopBgMusic();
@@ -276,31 +358,63 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
 
           for (const ev of events) {
             const s = curSlides[ev.slideIndex];
+            const maxDur = ev.maxDuration;
             if (ev.type === 'introHook') {
               const hookSfx = curTemplate.introHookSfx ?? 'whoosh';
+              const hasHookVoice = Boolean(curTemplate.introHookAudio?.dataUrl);
               if (hookSfx && hookSfx !== 'none') {
                 const ctx = soundEngine.getContext();
-                soundEngine.playBuiltInSfx(hookSfx, 0.72, ctx, ctx.destination, ctx.currentTime);
+                soundEngine.playBuiltInSfx(
+                  hookSfx,
+                  hasHookVoice ? 0.42 : 0.72,
+                  ctx,
+                  ctx.destination,
+                  ctx.currentTime,
+                  false,
+                  1.6,
+                  hasHookVoice ? Math.min(0.28, maxDur ?? 0.28) : maxDur
+                );
               }
               if (curTemplate.introHookAudio?.dataUrl) {
-                duckIfNeeded(curTemplate.introHookAudio.duration || 1.2);
-                void soundEngine.playClip(curTemplate.introHookAudio, 1);
+                const dur = Math.min(maxDur ?? 99, curTemplate.introHookAudio.duration || 1.2);
+                duckIfNeeded(dur);
+                void soundEngine.playClip(
+                  curTemplate.introHookAudio,
+                  1,
+                  undefined,
+                  undefined,
+                  undefined,
+                  'voice',
+                  maxDur
+                );
               }
             } else if (ev.type === 'questionEnter') {
-              if (s?.voiceover?.question) {
-                duckIfNeeded(s.voiceover.question.duration);
-                void soundEngine.playClip(s.voiceover.question, 1);
+              if (s?.voiceover?.question?.dataUrl) {
+                const dur = Math.min(maxDur ?? 99, s.voiceover.question.duration || 1.2);
+                duckIfNeeded(dur);
+                void soundEngine.playClip(
+                  s.voiceover.question,
+                  1,
+                  undefined,
+                  undefined,
+                  undefined,
+                  'voice',
+                  maxDur
+                );
               } else {
-                void soundEngine.playSlot(curAudio.questionEnter);
+                soundEngine.stopActiveVoice();
+                void soundEngine.playSlot(curAudio.questionEnter, undefined, undefined, undefined, false, maxDur);
               }
             } else if (ev.type === 'optionEnter') {
               const oIdx = ev.optionIndex ?? 0;
               const oClip = s?.voiceover?.options?.[oIdx];
-              if (oClip) {
-                duckIfNeeded(oClip.duration);
-                void soundEngine.playClip(oClip, 1);
+              if (oClip?.dataUrl) {
+                const dur = Math.min(maxDur ?? 99, oClip.duration || 1.0);
+                duckIfNeeded(dur);
+                void soundEngine.playClip(oClip, 1, undefined, undefined, undefined, 'voice', maxDur);
               } else {
-                void soundEngine.playSlot(curAudio.optionEnter);
+                soundEngine.stopActiveVoice();
+                void soundEngine.playSlot(curAudio.optionEnter, undefined, undefined, undefined, false, maxDur);
               }
             } else if (ev.type === 'countdownTick') {
               void soundEngine.playSlot(
@@ -308,16 +422,35 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
                 undefined,
                 undefined,
                 undefined,
-                !!ev.urgent
+                !!ev.urgent,
+                maxDur ?? 0.88
               );
             } else if (ev.type === 'suspense') {
-              void soundEngine.playSlot(curAudio.suspense);
+              void soundEngine.playSlot(
+                curAudio.suspense,
+                undefined,
+                undefined,
+                undefined,
+                false,
+                maxDur ?? Math.max(0.25, timingRef.current.suspenseDuration ?? 1.6),
+                timingRef.current.suspenseDuration
+              );
             } else if (ev.type === 'correctReveal') {
-              if (s?.voiceover?.answer) {
-                duckIfNeeded(s.voiceover.answer.duration);
-                void soundEngine.playClip(s.voiceover.answer, 1);
+              if (s?.voiceover?.answer?.dataUrl) {
+                const dur = Math.min(maxDur ?? 99, s.voiceover.answer.duration || 1.2);
+                duckIfNeeded(dur);
+                void soundEngine.playClip(
+                  s.voiceover.answer,
+                  1,
+                  undefined,
+                  undefined,
+                  undefined,
+                  'voice',
+                  maxDur
+                );
               } else {
-                void soundEngine.playSlot(curAudio.correctReveal);
+                soundEngine.stopActiveVoice();
+                void soundEngine.playSlot(curAudio.correctReveal, undefined, undefined, undefined, false, maxDur);
               }
             }
           }
@@ -344,15 +477,7 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
         const canvas = canvasRef.current;
         const ctx = canvas?.getContext('2d', { alpha: false });
         if (ctx) {
-          renderQuizFrame(
-            ctx,
-            nextT,
-            curSlides,
-            curTemplate,
-            timingRef.current,
-            curAudio,
-            true
-          );
+          drawPreviewFrame(ctx, nextT, curSlides, curTemplate, timingRef.current, curAudio);
         }
 
         rafId = requestAnimationFrame(tick);
@@ -367,11 +492,16 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
 
     let stopRaf: (() => void) | undefined;
     void startPlayback().then((cleanup) => {
+      if (isStale()) {
+        cleanup?.();
+        return;
+      }
       stopRaf = cleanup;
     });
 
     return () => {
       canceled = true;
+      playSessionRef.current += 1;
       stopRaf?.();
       setCurrentTime(timeRef.current);
       soundEngine.stopBgMusic();
@@ -421,6 +551,20 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
     setIsPlaying(true);
   };
 
+  const handlePlayCurrentSlide = () => {
+    soundEngine.getContext();
+    soundEngine.stopAllSfxAndVoice();
+    const schedules = computeProjectTimeline(slides, timing, audio, template);
+    const sched = schedules[activeSlideIndex] ?? schedules[0];
+    const target = sched ? sched.startTime : 0;
+    hasUserScrubbedRef.current = true;
+    isExternallySelectedSlideRef.current = false;
+    forceFirstTickRef.current = true;
+    timeRef.current = target;
+    setCurrentTime(target);
+    setIsPlaying(true);
+  };
+
   const handleStepSlide = (delta: number) => {
     const nextIdx = Math.max(0, Math.min(slides.length - 1, activeSlideIndex + delta));
     const schedules = computeProjectTimeline(slides, timing, audio, template);
@@ -453,7 +597,131 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
     const canvas = canvasRef.current;
     const ctx = canvas?.getContext('2d', { alpha: false });
     if (ctx) {
-      renderQuizFrame(ctx, val, slides, template, timing, audio, true);
+      drawPreviewFrame(ctx, val, slides, template, timing, audio);
+    }
+  };
+
+  const clientToCanvasPoint = (clientX: number, clientY: number) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return null;
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return null;
+    const scale = Math.min(rect.width / canvasW, rect.height / canvasH);
+    const drawnW = canvasW * scale;
+    const drawnH = canvasH * scale;
+    const offsetX = (rect.width - drawnW) / 2;
+    const offsetY = (rect.height - drawnH) / 2;
+    return {
+      x: ((clientX - rect.left - offsetX) / Math.max(1, drawnW)) * canvasW,
+      y: ((clientY - rect.top - offsetY) / Math.max(1, drawnH)) * canvasH,
+    };
+  };
+
+  const handleCanvasPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!dragMode || !onUpdateTemplate) return;
+    const pt = clientToCanvasPoint(e.clientX, e.clientY);
+    if (!pt) return;
+
+    const priority: DragTargetId[] = ['brand', 'timer', 'badge', 'question', 'options'];
+    let matched: DragTargetId | null = null;
+    for (const id of priority) {
+      const hb = hitboxesRef.current.find((h) => h.id === id);
+      if (!hb) continue;
+      const pad = 16;
+      if (
+        pt.x >= hb.x - pad &&
+        pt.x <= hb.x + hb.w + pad &&
+        pt.y >= hb.y - pad &&
+        pt.y <= hb.y + hb.h + pad
+      ) {
+        matched = id;
+        break;
+      }
+    }
+
+    if (!matched) {
+      setActiveDragTarget(null);
+      return;
+    }
+
+    e.preventDefault();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    setIsPlaying(false);
+    hasUserScrubbedRef.current = true;
+    setActiveDragTarget(matched);
+    dragSessionRef.current = {
+      target: matched,
+      startCanvasX: pt.x,
+      startCanvasY: pt.y,
+      startTemplate: { ...templateRef.current },
+    };
+  };
+
+  const handleCanvasPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const session = dragSessionRef.current;
+    if (!dragMode || !session || !onUpdateTemplate) return;
+    const pt = clientToCanvasPoint(e.clientX, e.clientY);
+    if (!pt) return;
+
+    const gScale = Math.max(0.75, Math.min(1.25, session.startTemplate.globalScale ?? 1));
+    const scaleFactor = session.target === 'brand' ? 1 : gScale;
+    const dxPct = (((pt.x - session.startCanvasX) / scaleFactor) / canvasW) * 100;
+    const dyPct = (((pt.y - session.startCanvasY) / scaleFactor) / canvasH) * 100;
+    const clampPct = (v: number, min = 3, max = 97) =>
+      Math.round(Math.max(min, Math.min(max, v)) * 10) / 10;
+
+    const base = session.startTemplate;
+    let next: TemplateSettings | null = null;
+
+    if (session.target === 'badge') {
+      next = {
+        ...base,
+        badgeX: clampPct((base.badgeX ?? 50) + dxPct, 5, 95),
+        badgeY: clampPct((base.badgeY ?? 15) + dyPct, 2, 92),
+      };
+    } else if (session.target === 'question') {
+      next = {
+        ...base,
+        questionX: clampPct((base.questionX ?? 50) + dxPct, 5, 95),
+        questionY: clampPct((base.questionY ?? 28) + dyPct, 5, 95),
+      };
+    } else if (session.target === 'options') {
+      next = {
+        ...base,
+        optionsX: clampPct((base.optionsX ?? 50) + dxPct, 5, 95),
+        optionsStartY: clampPct((base.optionsStartY ?? 48) + dyPct, 8, 92),
+      };
+    } else if (session.target === 'timer') {
+      next = {
+        ...base,
+        timerPlacement: 'free',
+        timerX: clampPct((base.timerX ?? 50) + dxPct, 4, 96),
+        timerY: clampPct((base.timerY ?? 41) + dyPct, 4, 96),
+      };
+    } else if (session.target === 'brand') {
+      next = {
+        ...base,
+        brandLogoPosition: 'custom',
+        brandLogoX: clampPct((base.brandLogoX ?? 8) + dxPct, 3, 97),
+        brandLogoY: clampPct((base.brandLogoY ?? 6) + dyPct, 3, 97),
+      };
+    }
+
+    if (next) {
+      onUpdateTemplate(next);
+    }
+  };
+
+  const handleCanvasPointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (dragSessionRef.current) {
+      dragSessionRef.current = null;
+      try {
+        if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+          e.currentTarget.releasePointerCapture(e.pointerId);
+        }
+      } catch {
+        // ignore
+      }
     }
   };
 
@@ -505,7 +773,7 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
     const canvas = canvasRef.current;
     const ctx = canvas?.getContext('2d', { alpha: false });
     if (ctx) {
-      renderQuizFrame(ctx, clamped, slides, template, timing, audio, true);
+      drawPreviewFrame(ctx, clamped, slides, template, timing, audio);
     }
   };
 
@@ -528,6 +796,33 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
     }
   };
 
+  const activePhaseId: 'intro' | 'question' | 'opt1' | 'opt4' | 'timer' | 'suspense' | 'reveal' | 'end' | null = (() => {
+    const introDur = getIntroHookDuration(template, timing);
+    if (introDur > 0 && currentTime < introDur) return 'intro';
+    const contentEnd = getSlidesContentDuration(slides, timing, audio, template);
+    if (template.showEndCard && currentTime >= contentEnd) return 'end';
+    const info = getSlideTimeInfo(currentTime, slides, timing, audio, template);
+    if (!info) return null;
+    const { localTime, schedule } = info;
+    if (localTime < schedule.tOptionStarts[0]) return 'question';
+    if (localTime < (schedule.tOptionStarts[1] ?? schedule.tThinkingStart)) return 'opt1';
+    if (localTime < schedule.tThinkingStart) return 'opt4';
+    if (localTime < schedule.tTimerExitStart) return 'timer';
+    if (localTime < schedule.tRevealStart) return 'suspense';
+    return 'reveal';
+  })();
+
+  const currentPhaseLabel = (() => {
+    if (activePhaseId === 'intro') return 'المقدمة';
+    if (activePhaseId === 'end') return 'النهاية';
+    if (activePhaseId === 'question') return 'السؤال';
+    if (activePhaseId === 'opt1' || activePhaseId === 'opt4') return 'ظهور الخيارات';
+    if (activePhaseId === 'timer') return 'العد التنازلي ⏱️';
+    if (activePhaseId === 'suspense') return 'التشويق 🔥';
+    if (activePhaseId === 'reveal') return 'كشف الجواب ✓';
+    return '';
+  })();
+
   const isActiveTF = slides[activeSlideIndex]?.slideType === 'trueFalse';
   const phases: {
     id: 'intro' | 'question' | 'opt1' | 'opt4' | 'timer' | 'suspense' | 'reveal' | 'end';
@@ -543,31 +838,84 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
     ...(template.showEndCard ? [{ id: 'end' as const, label: 'النهاية' }] : []),
   ];
 
+  const isCollapsedMobile = mobileStageMode === 'collapsed';
+  const isCompactMobile = mobileStageMode === 'compact';
+
   return (
-    <div className="flex flex-col items-center justify-between h-full w-full gap-3 py-3 px-4">
+    <div
+      className={`flex flex-col items-center justify-between w-full ${
+        isCollapsedMobile ? 'lg:h-full' : 'h-full'
+      } ${isCompactMobile ? 'gap-1.5 py-1.5 px-2.5 lg:gap-3 lg:py-3 lg:px-4' : 'gap-2.5 py-2.5 px-3 lg:gap-3 lg:py-3 lg:px-4'}`}
+    >
+      {/* Mobile Collapsed Mini Bar */}
+      {isCollapsedMobile && onChangeMobileStageMode && (
+        <div className="flex lg:hidden items-center justify-between gap-2 w-full px-2.5 py-1.5 rounded-xl bg-[var(--panel)] border border-[var(--pline)]">
+          <div className="flex items-center gap-2 min-w-0">
+            <button
+              type="button"
+              onClick={handleTogglePlay}
+              className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#00B050] text-white text-[11px] font-bold shrink-0 cursor-pointer"
+            >
+              {isPlaying ? <Pause className="w-3 h-3" /> : <Play className="w-3 h-3" />}
+              <span>{isPlaying ? 'إيقاف' : 'تشغيل'}</span>
+            </button>
+            <span className="text-[11px] font-bold text-[var(--ptxt)] truncate">
+              {currentPhaseLabel || 'معاينة الفيديو'}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => onChangeMobileStageMode('compact')}
+            className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[var(--surface)] border border-[var(--pline)] text-[11px] font-bold text-[#00B050] dark:text-[#6ee7b7] shrink-0 cursor-pointer"
+          >
+            <ChevronDown className="w-3.5 h-3.5" />
+            <span>إظهار الشاشة</span>
+          </button>
+        </div>
+      )}
+
       {/* Stage Quick Jump Bar */}
       {!hideControlsOverlay && (
-        <div className="flex flex-wrap items-center justify-center gap-1.5 w-full max-w-2xl">
-          <span className="text-xs text-[var(--pmuted)] ml-1 whitespace-nowrap">معاينة:</span>
-          {phases.map((p) => (
-            <button
-              key={p.id}
-              type="button"
-              onClick={() => jumpToPhase(p.id)}
-              className="px-2.5 py-1 text-xs font-semibold rounded-md bg-[var(--panel)] hover:border-[var(--gold)] text-[var(--ptxt)] border border-[var(--pline)] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-            >
-              {p.label}
-            </button>
-          ))}
+        <div
+          className={`${
+            isCollapsedMobile ? 'hidden lg:flex' : 'flex'
+          } items-center lg:flex-wrap lg:justify-center gap-1.5 w-full max-w-2xl overflow-x-auto no-scrollbar`}
+        >
+          <span className="text-[11px] lg:text-xs text-[var(--pmuted)] ml-1 whitespace-nowrap shrink-0">
+            معاينة:
+          </span>
+          {phases.map((p) => {
+            const isActivePhase = activePhaseId === p.id;
+            return (
+              <button
+                key={p.id}
+                type="button"
+                onClick={() => jumpToPhase(p.id)}
+                className={`px-2 py-0.5 lg:px-2.5 lg:py-1 text-[11px] lg:text-xs font-semibold rounded-md border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                  isActivePhase
+                    ? 'bg-[#00B050] text-white border-[#00B050]'
+                    : 'bg-[var(--panel)] hover:border-[var(--gold)] text-[var(--ptxt)] border-[var(--pline)]'
+                }`}
+              >
+                {p.label}
+              </button>
+            );
+          })}
         </div>
       )}
 
       {/* Stage Frame: Adaptive 9:16 Vertical Shorts OR 16:9 Landscape Long Video */}
-      <div className="relative flex-1 flex items-center justify-center min-h-0 w-full">
+      <div
+        className={`${
+          isCollapsedMobile ? 'hidden lg:flex' : 'flex'
+        } relative flex-1 items-center justify-center min-h-0 w-full`}
+      >
         <div
-          className={`relative rounded-2xl overflow-hidden bg-black border-2 border-[var(--pline)] shadow-2xl shadow-black/70 transition-all duration-200 ${
+          className={`relative rounded-2xl overflow-hidden bg-black border-2 transition-all duration-200 shadow-2xl shadow-black/70 ${
+            dragMode ? 'border-[#00B050]' : 'border-[var(--pline)]'
+          } ${
             isWide
-              ? 'w-full max-w-[780px] aspect-video'
+              ? 'w-full max-w-[780px] max-h-full aspect-video'
               : 'h-full max-h-[650px] aspect-[9/16]'
           }`}
         >
@@ -575,9 +923,25 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
             ref={canvasRef}
             width={canvasW}
             height={canvasH}
-            onClick={handleTogglePlay}
-            className="w-full h-full object-contain cursor-pointer block"
+            onClick={() => {
+              if (!dragMode) handleTogglePlay();
+            }}
+            onPointerDown={handleCanvasPointerDown}
+            onPointerMove={handleCanvasPointerMove}
+            onPointerUp={handleCanvasPointerUp}
+            onPointerCancel={handleCanvasPointerUp}
+            className={`w-full h-full object-contain block touch-none ${
+              dragMode ? 'cursor-move' : 'cursor-pointer'
+            }`}
           />
+
+          {dragMode && !hideControlsOverlay && (
+            <div className="pointer-events-none absolute bottom-2.5 inset-x-2 flex justify-center">
+              <span className="px-3 py-1 rounded-full bg-[#00B050]/92 text-white text-[11px] font-bold shadow-lg">
+                اسحب السؤال أو الخيارات أو المؤقت أو الشارة أو الشعار مباشرة
+              </span>
+            </div>
+          )}
 
           {/* Floating Channel-Style Top Quick Action Strip */}
           <div
@@ -645,8 +1009,23 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
       </div>
 
       {/* Bottom Scrubber & Controls */}
-      <div className="w-full max-w-lg bg-[var(--panel)] border border-[var(--pline)] rounded-xl p-3 flex flex-col gap-2.5">
-        <div className="flex items-center gap-3">
+      <div
+        className={`${
+          isCollapsedMobile ? 'hidden lg:flex' : 'flex'
+        } w-full max-w-lg bg-[var(--panel)] border border-[var(--pline)] rounded-xl ${
+          isCompactMobile ? 'p-2 lg:p-3 gap-1.5 lg:gap-2.5' : 'p-3 gap-2.5'
+        } flex-col`}
+      >
+        <div className="flex items-center gap-2 lg:gap-3">
+          <button
+            type="button"
+            onClick={handleTogglePlay}
+            className="lg:hidden flex items-center justify-center w-8 h-8 rounded-lg bg-[#00B050] text-white shrink-0 cursor-pointer"
+            title={isPlaying ? 'إيقاف' : 'تشغيل'}
+          >
+            {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
+          </button>
+
           <input
             ref={rangeInputRef}
             type="range"
@@ -660,14 +1039,68 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
           />
           <span
             ref={timeLabelRef}
-            className="font-mono-nums text-xs text-[var(--ptxt)] whitespace-nowrap shrink-0"
+            className="font-mono-nums text-[11px] lg:text-xs text-[var(--ptxt)] whitespace-nowrap shrink-0"
             dir="ltr"
           >
             {formatTimecode(currentTime)} / {formatTimecode(totalDuration)}
           </span>
+
+          {/* Mobile compact bar quick controls */}
+          {onChangeMobileStageMode && (
+            <div className="flex lg:hidden items-center gap-1 shrink-0">
+              {onUpdateTemplate && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsPlaying(false);
+                    setDragMode((v) => !v);
+                    setActiveDragTarget(null);
+                  }}
+                  title="تحريك حر"
+                  className={`p-1.5 rounded-lg border cursor-pointer ${
+                    dragMode
+                      ? 'bg-[#00B050] border-[#00B050] text-white'
+                      : 'bg-[var(--surface)] border-[var(--pline)] text-[var(--ptxt)]'
+                  }`}
+                >
+                  <Move className="w-3.5 h-3.5" />
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() =>
+                  onChangeMobileStageMode(
+                    mobileStageMode === 'expanded' ? 'compact' : 'expanded'
+                  )
+                }
+                title={mobileStageMode === 'expanded' ? 'تصغير والعودة للمحرر' : 'تكبير المعاينة'}
+                className="p-1.5 rounded-lg bg-[var(--surface)] border border-[var(--pline)] text-[var(--ptxt)] cursor-pointer"
+              >
+                {mobileStageMode === 'expanded' ? (
+                  <Minimize2 className="w-3.5 h-3.5 text-[#00B050]" />
+                ) : (
+                  <Maximize2 className="w-3.5 h-3.5" />
+                )}
+              </button>
+              {mobileStageMode !== 'expanded' && (
+                <button
+                  type="button"
+                  onClick={() => onChangeMobileStageMode('collapsed')}
+                  title="طي الشاشة لتوسيع المحرر"
+                  className="p-1.5 rounded-lg bg-[var(--surface)] border border-[var(--pline)] text-[var(--pmuted)] cursor-pointer"
+                >
+                  <ChevronUp className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+          )}
         </div>
 
-        <div className="flex flex-wrap items-center justify-between gap-2">
+        <div
+          className={`${
+            isCompactMobile ? 'hidden lg:flex' : 'flex'
+          } flex-wrap items-center justify-between gap-2`}
+        >
           <div className="flex items-center gap-2">
             <button
               type="button"
@@ -686,9 +1119,24 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
             >
               <RotateCcw className="w-4 h-4" />
             </button>
+
+            <button
+              type="button"
+              onClick={handlePlayCurrentSlide}
+              title="تشغيل السؤال الحالي من بدايته"
+              className="px-2.5 py-2 rounded-lg bg-[var(--surface)] hover:border-[#00B050] text-[var(--ptxt)] border border-[var(--pline)] text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer"
+            >
+              السؤال الحالي
+            </button>
+
+            {currentPhaseLabel && (
+              <span className="hidden sm:inline-block px-2 py-1 rounded-md bg-[var(--surface)] border border-[var(--pline)] text-[11px] font-bold text-[#EDD6A2] whitespace-nowrap">
+                {currentPhaseLabel}
+              </span>
+            )}
           </div>
 
-          <div className="flex items-center gap-1.5">
+          <div className="flex flex-wrap items-center gap-1.5">
             {onToggleAspectRatio && (
               <button
                 type="button"
@@ -725,6 +1173,26 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
               <Camera className="w-3.5 h-3.5 text-[#00B050]" />
               <span>{isCapturingThumb ? 'جارٍ الحفظ...' : 'غلاف JPG'}</span>
             </button>
+
+            {onUpdateTemplate && (
+              <button
+                type="button"
+                onClick={() => {
+                  setIsPlaying(false);
+                  setDragMode((v) => !v);
+                  setActiveDragTarget(null);
+                }}
+                title="سحب وتحريك أي عنصر بالماوس مباشرة على الشاشة"
+                className={`flex items-center gap-1.5 px-2.5 py-2 rounded-lg text-xs font-bold border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                  dragMode
+                    ? 'bg-[#00B050] border-[#00B050] text-white'
+                    : 'bg-[var(--surface)] border-[var(--pline)] text-[var(--ptxt)] hover:border-[#00B050]'
+                }`}
+              >
+                <Move className="w-3.5 h-3.5" />
+                <span>تحريك حر</span>
+              </button>
+            )}
 
             <button
               type="button"

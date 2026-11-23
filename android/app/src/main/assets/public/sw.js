@@ -87,7 +87,7 @@ define(['./workbox-afac4cd2'], (function (workbox) { 'use strict';
     "revision": "780ee580f3221417358a1ba588d21023"
   }, {
     "url": "index.html",
-    "revision": "c510e9518a3422f81fd814e40ac2510b"
+    "revision": "7bbd72bf8c0636b5b4d0f4f9f578f391"
   }, {
     "url": "icon.svg",
     "revision": "d0c8667cb31ec987bb8d619decf986df"
@@ -155,10 +155,7 @@ define(['./workbox-afac4cd2'], (function (workbox) { 'use strict';
     "url": "mathlive/fonts/KaTeX_AMS-Regular.woff2",
     "revision": "66c678209ce93b6e2b583f02ce41529e"
   }, {
-    "url": "assets/workbox-window.prod.es5-Bd17z0YL.js",
-    "revision": null
-  }, {
-    "url": "assets/web-BkY-ZwGA.js",
+    "url": "assets/web-mWyTr7z_.js",
     "revision": null
   }, {
     "url": "assets/read-excel-file-BZ04sF_L.js",
@@ -167,13 +164,13 @@ define(['./workbox-afac4cd2'], (function (workbox) { 'use strict';
     "url": "assets/mathlive-DJ-knq2g.js",
     "revision": null
   }, {
-    "url": "assets/mammoth.browser-CBK6EAFY.js",
+    "url": "assets/mammoth.browser-3xOZxscG.js",
     "revision": null
   }, {
-    "url": "assets/index-bd_Qm-OP.css",
+    "url": "assets/index-DUXffSHw.css",
     "revision": null
   }, {
-    "url": "assets/index--cFtILyE.js",
+    "url": "assets/index-BqXCS-Hx.js",
     "revision": null
   }, {
     "url": "assets/aistudio/_________021e73d3.html",

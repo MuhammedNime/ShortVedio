@@ -61,9 +61,19 @@
   background: rgba(212, 167, 58, 0.45);
 }
 
-/* Range sliders accented in channel emerald green */
+/* Range sliders accented in channel emerald green & comfortable on touch */
 input[type='range'] {
   accent-color: #00b050;
+  cursor: pointer;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
 }
 
 /* Keep MathLive virtual keyboard above studio modals & drawers */

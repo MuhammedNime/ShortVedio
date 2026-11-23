@@ -443,22 +443,32 @@ function splitMixedSegments(raw: string): MixedSegment[] {
   return segs;
 }
 
-export function drawSmartQuizText(
+interface LayoutRowItem {
+  seg: MixedSegment;
+  width: number;
+  ascent: number;
+  descent: number;
+}
+
+interface SmartTextLayout {
+  visibleRows: LayoutRowItem[][];
+  rowTotals: Array<{ totalW: number; maxAscent: number; maxDescent: number }>;
+  rowHeights: number[];
+  totalBlockH: number;
+}
+
+function layoutSmartQuizText(
   ctx: CanvasRenderingContext2D,
   rawText: string,
-  centerX: number,
-  centerY: number,
   maxWidth: number,
   fontSize: number,
   fontStack: string,
   weight: number | string,
-  color: string,
   maxLines = 3
-): void {
+): SmartTextLayout {
   const segments = splitMixedSegments(rawText);
 
-  // Measure every segment
-  const measured = segments.map((seg) => {
+  const measured: LayoutRowItem[] = segments.map((seg) => {
     if (seg.kind === 'math' && seg.ast) {
       const m = measureMathNode(ctx, seg.ast, fontSize, fontStack, weight);
       return { seg, width: m.width, ascent: m.ascent, descent: m.descent };
@@ -475,14 +485,12 @@ export function drawSmartQuizText(
     };
   });
 
-  // Pack segments into RTL logical lines (first segment goes on the right)
-  type LineRow = typeof measured;
+  type LineRow = LayoutRowItem[];
   const rows: LineRow[] = [];
   let currentRow: LineRow = [];
   let currentW = 0;
 
   for (const item of measured) {
-    // If an Arabic text segment itself is too wide for single line, break it at words before adding
     if (item.seg.kind === 'rtl' && item.width > maxWidth * 0.94) {
       const words = (item.seg.text ?? '').trim().split(/\s+/).filter(Boolean);
       let buf = '';
@@ -542,7 +550,6 @@ export function drawSmartQuizText(
 
   const visibleRows = rows.slice(0, maxLines);
 
-  // Auto-scale down if total row width exceeds box width
   const rowTotals = visibleRows.map((row) => ({
     totalW: row.reduce((s, r) => s + r.width, 0),
     maxAscent: Math.max(...row.map((r) => r.ascent), fontSize * 0.7),
@@ -551,6 +558,43 @@ export function drawSmartQuizText(
 
   const rowHeights = rowTotals.map((rt) => rt.maxAscent + rt.maxDescent + fontSize * 0.34);
   const totalBlockH = rowHeights.reduce((s, h) => s + h, 0);
+
+  return { visibleRows, rowTotals, rowHeights, totalBlockH };
+}
+
+export function measureSmartQuizTextHeight(
+  ctx: CanvasRenderingContext2D,
+  rawText: string,
+  maxWidth: number,
+  fontSize: number,
+  fontStack: string,
+  weight: number | string,
+  maxLines = 3
+): number {
+  return layoutSmartQuizText(ctx, rawText, maxWidth, fontSize, fontStack, weight, maxLines).totalBlockH;
+}
+
+export function drawSmartQuizText(
+  ctx: CanvasRenderingContext2D,
+  rawText: string,
+  centerX: number,
+  centerY: number,
+  maxWidth: number,
+  fontSize: number,
+  fontStack: string,
+  weight: number | string,
+  color: string,
+  maxLines = 3
+): void {
+  const { visibleRows, rowTotals, rowHeights, totalBlockH } = layoutSmartQuizText(
+    ctx,
+    rawText,
+    maxWidth,
+    fontSize,
+    fontStack,
+    weight,
+    maxLines
+  );
 
   let cursorY = centerY - totalBlockH / 2;
 

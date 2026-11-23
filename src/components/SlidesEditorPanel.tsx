@@ -1,5 +1,7 @@
 import React, { useRef, useState } from 'react';
 import {
+  ArrowLeft,
+  ArrowRight,
   Calculator,
   Check,
   Copy,
@@ -28,6 +30,7 @@ import {
   ImageChallengeMode,
   QuestionSlide,
   SlideAudioClip,
+  SlideDifficulty,
   SlideType,
 } from '../types/quiz';
 import { MathFieldInput } from './MathFieldInput';
@@ -43,6 +46,8 @@ interface SlidesEditorPanelProps {
   onAddSlide: () => void;
   onDuplicateSlide: (idx: number) => void;
   onDeleteSlide: (idx: number) => void;
+  onReorderSlide?: (fromIdx: number, toIdx: number) => void;
+  onUpdateAllSlides?: (updater: (slides: QuestionSlide[]) => QuestionSlide[]) => void;
 }
 
 const OPTION_LETTERS = ['أ', 'ب', 'ج', 'د'];
@@ -57,6 +62,8 @@ export const SlidesEditorPanel: React.FC<SlidesEditorPanelProps> = ({
   onAddSlide,
   onDuplicateSlide,
   onDeleteSlide,
+  onReorderSlide,
+  onUpdateAllSlides,
 }) => {
   const activeSlide = slides[activeIndex] ?? slides[0];
   const fileInputsRef = useRef<Record<string, HTMLInputElement | null>>({});
@@ -520,6 +527,31 @@ export const SlidesEditorPanel: React.FC<SlidesEditorPanelProps> = ({
             <Copy className="w-3.5 h-3.5" />
             <span>تكرار</span>
           </button>
+
+          {onReorderSlide && slides.length > 1 && (
+            <div className="flex items-center rounded-md border border-[var(--pline)] bg-[var(--surface)] overflow-hidden">
+              <button
+                type="button"
+                disabled={activeIndex <= 0}
+                onClick={() => onReorderSlide(activeIndex, activeIndex - 1)}
+                title="نقل الشريحة للأمام (السابق)"
+                aria-label="نقل الشريحة للأمام"
+                className="p-1.5 text-[var(--ptxt)] hover:bg-[#00B050]/15 disabled:opacity-35 cursor-pointer"
+              >
+                <ArrowRight className="w-3.5 h-3.5" />
+              </button>
+              <button
+                type="button"
+                disabled={activeIndex >= slides.length - 1}
+                onClick={() => onReorderSlide(activeIndex, activeIndex + 1)}
+                title="نقل الشريحة للخلف (التالي)"
+                aria-label="نقل الشريحة للخلف"
+                className="p-1.5 text-[var(--ptxt)] hover:bg-[#00B050]/15 disabled:opacity-35 border-r border-[var(--pline)] cursor-pointer"
+              >
+                <ArrowLeft className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
 
           {slides.length > 1 ? (
             <button
@@ -1101,8 +1133,41 @@ export const SlidesEditorPanel: React.FC<SlidesEditorPanelProps> = ({
           />
         </div>
 
-        <label className="flex flex-col gap-1">
-          <span className="text-[11px] text-[var(--pmuted)]">عنوان الشارة العلوية (إذا فعّلتها في القالب)</span>
+        <div className="flex flex-col gap-1.5">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[11px] text-[var(--pmuted)]">
+              عنوان الشارة العلوية (إذا فعّلتها في القالب)
+            </span>
+            {onUpdateAllSlides && slides.length > 1 && (
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const raw = (activeSlide.badgeText || 'السؤال 1').trim();
+                    const prefix = raw.replace(/\s*\d+\s*$/, '').trim() || 'السؤال';
+                    onUpdateAllSlides((all) =>
+                      all.map((sl, i) => ({ ...sl, badgeText: `${prefix} ${i + 1}` }))
+                    );
+                  }}
+                  title="ترقيم جميع الشرائح بنفس البادئة (مثل: السؤال 1، السؤال 2...)"
+                  className="px-2 py-0.5 rounded bg-[var(--surface)] border border-[var(--pline)] hover:border-[#00B050] text-[10px] font-bold text-[#00B050] dark:text-[#6ee7b7] cursor-pointer whitespace-nowrap"
+                >
+                  ترقيم الكل تلقائياً
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const txt = activeSlide.badgeText;
+                    onUpdateAllSlides((all) => all.map((sl) => ({ ...sl, badgeText: txt })));
+                  }}
+                  title="تطبيق نفس نص الشارة على جميع الأسئلة"
+                  className="px-2 py-0.5 rounded bg-[var(--surface)] border border-[var(--pline)] hover:border-[var(--gold)] text-[10px] font-bold text-[var(--ptxt)] cursor-pointer whitespace-nowrap"
+                >
+                  نسخ للكل
+                </button>
+              </div>
+            )}
+          </div>
           <input
             type="text"
             value={activeSlide.badgeText}
@@ -1112,7 +1177,48 @@ export const SlidesEditorPanel: React.FC<SlidesEditorPanelProps> = ({
             placeholder="مثال: السؤال 1"
             className="w-full px-3 py-1.5 rounded-lg bg-[var(--surface)] border border-[var(--pline)] focus:border-[#00B050] focus:outline-none text-xs text-[var(--ptxt)] placeholder:text-[var(--pmuted)]"
           />
-        </label>
+        </div>
+
+        {/* Optional Per-Slide Difficulty Pill */}
+        <div className="flex items-center justify-between gap-2 pt-1">
+          <span className="text-[11px] text-[var(--pmuted)] whitespace-nowrap">
+            شارة الصعوبة (اختياري):
+          </span>
+          <div className="flex items-center gap-1 p-0.5 rounded-lg bg-[var(--surface)] border border-[var(--pline)]">
+            {(
+              [
+                { id: 'none', label: 'بدون', dot: '' },
+                { id: 'easy', label: 'سهل', dot: '#22C55E' },
+                { id: 'medium', label: 'متوسط', dot: '#F59E0B' },
+                { id: 'hard', label: 'صعب', dot: '#EF4444' },
+              ] as { id: SlideDifficulty; label: string; dot: string }[]
+            ).map((d) => {
+              const active = (activeSlide.difficulty || 'none') === d.id;
+              return (
+                <button
+                  key={d.id}
+                  type="button"
+                  onClick={() =>
+                    onUpdateSlide(activeIndex, { ...activeSlide, difficulty: d.id })
+                  }
+                  className={`flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-bold transition-colors cursor-pointer ${
+                    active
+                      ? 'bg-[#00B050] text-white'
+                      : 'text-[var(--pmuted)] hover:text-[var(--ptxt)]'
+                  }`}
+                >
+                  {d.dot && (
+                    <span
+                      className="w-2 h-2 rounded-full shrink-0"
+                      style={{ backgroundColor: active ? '#FFFFFF' : d.dot }}
+                    />
+                  )}
+                  <span>{d.label}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
       </div>
     </div>
   );

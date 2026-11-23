@@ -1,27 +1,51 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   BookmarkPlus,
+  Box,
+  Check,
+  ChevronDown,
   Crown,
+  Download,
   ImagePlus,
+  LayoutGrid,
   LayoutTemplate,
   Loader2,
   Monitor,
+  Palette,
+  Pencil,
   Play,
+  Redo2,
+  RefreshCw,
+  RotateCcw,
   Smartphone,
   Sparkles,
+  Star,
+  Timer,
   Trash2,
+  Type,
+  Undo2,
+  Unlock,
   Upload,
+  Wand2,
   X,
 } from 'lucide-react';
 import { BUILTIN_SFX_OPTIONS, soundEngine } from '../audio/soundEngine';
 import { AiVoiceName, generateSingleTtsClip } from '../services/aiClient';
 import {
   CustomTemplatePreset,
-  deleteCustomPreset,
+  deleteCustomPresetAsync,
+  getDefaultCustomStyleId,
+  importCustomStyleFromJson,
   loadCustomPresets,
-  saveCustomPreset,
+  loadCustomPresetsAsync,
+  renameCustomPresetAsync,
+  saveCustomPresetAsync,
+  serializeStylePreset,
+  setDefaultCustomStyleId,
+  updateCustomPresetAsync,
 } from '../storage/customPresets';
 import { readFileAsDataUrl } from '../storage/projectStore';
+import { saveOrDownloadBlob } from '../utils/nativeDownload';
 import {
   AnimationStyle,
   BackgroundMotion,
@@ -37,11 +61,18 @@ import {
   OptionTextAlign,
   OptionsAppearMode,
   PRESET_BACKDROPS,
+  PresetId,
   PrizeLadderStyle,
+  QuestionTextAlign,
   RevealStyle,
   SlideTransitionStyle,
   TemplateSettings,
+  ThemeApplyMode,
+  TimerPlacement,
   TimerStyle,
+  TimerUnitSuffix,
+  TimerVisibilityMode,
+  TimingSettings,
   applyStudioThemePreset,
   applyThemeBackgroundOnly,
 } from '../types/quiz';
@@ -49,8 +80,14 @@ import { MicRecordButton } from './MicRecordButton';
 
 interface TemplateDesignPanelProps {
   template: TemplateSettings;
+  timing?: TimingSettings;
   aiVoiceName?: AiVoiceName;
-  onChange: (next: TemplateSettings) => void;
+  canUndo?: boolean;
+  canRedo?: boolean;
+  onUndo?: () => void;
+  onRedo?: () => void;
+  onChange: (next: TemplateSettings, immediate?: boolean) => void;
+  onTimingChange?: (next: TimingSettings) => void;
 }
 
 const ANIM_OPTIONS: { id: AnimationStyle; label: string }[] = [
@@ -62,43 +99,132 @@ const ANIM_OPTIONS: { id: AnimationStyle; label: string }[] = [
   { id: 'fade', label: 'تلاشي ناعم' },
 ];
 
+const ONE_CLICK_STYLES: { id: PresetId; label: string; emoji: string; accent: string }[] = [
+  { id: 'channelSand', label: 'أسلوب القناة', emoji: '📺', accent: '#EDD6A2' },
+  { id: 'millionaire', label: 'المليونير', emoji: '💎', accent: '#1a3b8e' },
+  { id: 'neonCyber', label: 'النيون', emoji: '⚡', accent: '#22d3ee' },
+  { id: 'parchmentGold', label: 'المخطوطة', emoji: '📜', accent: '#e8d4a2' },
+  { id: 'tvShowGold', label: 'البث الذهبي', emoji: '🏆', accent: '#facc15' },
+  { id: 'crimsonArena', label: 'حلبة التحدي', emoji: '🔥', accent: '#f43f5e' },
+];
+
 export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
   template,
+  timing,
   aiVoiceName = 'Kore',
+  canUndo = false,
+  canRedo = false,
+  onUndo,
+  onRedo,
   onChange,
+  onTimingChange,
 }) => {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const logoInputRef = useRef<HTMLInputElement | null>(null);
   const hookAudioInputRef = useRef<HTMLInputElement | null>(null);
+  const styleJsonInputRef = useRef<HTMLInputElement | null>(null);
   const [customPresets, setCustomPresets] = useState<CustomTemplatePreset[]>(() =>
     loadCustomPresets()
   );
   const [presetNameInput, setPresetNameInput] = useState('');
-  const [themeApplyMode, setThemeApplyMode] = useState<'bgOnly' | 'full'>('bgOnly');
+  const [activeCustomId, setActiveCustomId] = useState<string | null>(null);
+  const [defaultStyleId, setDefaultStyleId] = useState<string | null>(() =>
+    getDefaultCustomStyleId()
+  );
+  const [includeMediaInSave, setIncludeMediaInSave] = useState(true);
+  const [includeTimingInSave, setIncludeTimingInSave] = useState(false);
+  const [editingPresetId, setEditingPresetId] = useState<string | null>(null);
+  const [editingPresetName, setEditingPresetName] = useState('');
+  const [styleError, setStyleError] = useState('');
+  const [appliedNotice, setAppliedNotice] = useState<string | null>(null);
   const [isHookVoicing, setIsHookVoicing] = useState(false);
   const [hookAudioError, setHookAudioError] = useState('');
+  const noticeTimerRef = useRef<number | null>(null);
 
-  const patch = (partial: Partial<TemplateSettings>) => {
-    onChange({ ...template, ...partial });
+  type TemplateSectionId =
+    | 'styles'
+    | 'format'
+    | 'backdrop'
+    | 'question'
+    | 'shapes'
+    | 'options'
+    | 'timer'
+    | 'introEnd'
+    | 'brand';
+
+  const [openSection, setOpenSection] = useState<TemplateSectionId | null>('styles');
+  const [expandAllSections, setExpandAllSections] = useState(false);
+  const sectionRefs = useRef<Partial<Record<TemplateSectionId, HTMLElement | null>>>({});
+
+  const isSectionOpen = (id: TemplateSectionId) => expandAllSections || openSection === id;
+
+  const toggleSection = (id: TemplateSectionId) => {
+    if (expandAllSections) {
+      setExpandAllSections(false);
+      setOpenSection(id);
+      return;
+    }
+    setOpenSection((prev) => (prev === id ? null : id));
+  };
+
+  const jumpToSection = (id: TemplateSectionId) => {
+    setExpandAllSections(false);
+    setOpenSection(id);
+    window.setTimeout(() => {
+      sectionRefs.current[id]?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }, 40);
+  };
+
+  useEffect(() => {
+    void loadCustomPresetsAsync().then((loaded) => {
+      setCustomPresets(loaded);
+    });
+    return () => {
+      if (noticeTimerRef.current) {
+        window.clearTimeout(noticeTimerRef.current);
+      }
+    };
+  }, []);
+
+  const showToast = (msg: string) => {
+    setAppliedNotice(msg);
+    if (noticeTimerRef.current) {
+      window.clearTimeout(noticeTimerRef.current);
+    }
+    noticeTimerRef.current = window.setTimeout(() => {
+      setAppliedNotice(null);
+    }, 1800);
+  };
+
+  const themeApplyMode: ThemeApplyMode = template.themeApplyMode || 'bgOnly';
+
+  const patch = (partial: Partial<TemplateSettings>, immediate = true) => {
+    onChange({ ...template, ...partial }, immediate);
   };
 
   const applyChannelPreset = () => {
-    onChange({
-      ...DEFAULT_TEMPLATE,
-      aspectRatio: template.aspectRatio,
-      customBgDataUrl: template.customBgDataUrl,
-      customBgName: template.customBgName,
-      showSafeGuides: template.showSafeGuides,
-      endCardText: template.endCardText || 'شكراً لمشاهدتكم',
-      brandLogoDataUrl: template.brandLogoDataUrl,
-      brandLogoName: template.brandLogoName,
-      brandLogoAnim: template.brandLogoAnim,
-      brandLogoSize: template.brandLogoSize,
-      brandLogoPosition: template.brandLogoPosition,
-      brandHandleText: template.brandHandleText,
-      brandOpacity: template.brandOpacity,
-      showProgressCounter: template.showProgressCounter,
-    });
+    onChange(
+      {
+        ...DEFAULT_TEMPLATE,
+        aspectRatio: template.aspectRatio,
+        customBgDataUrl: template.customBgDataUrl,
+        customBgName: template.customBgName,
+        showSafeGuides: template.showSafeGuides,
+        endCardText: template.endCardText || 'شكراً لمشاهدتكم',
+        brandLogoDataUrl: template.brandLogoDataUrl,
+        brandLogoName: template.brandLogoName,
+        brandLogoAnim: template.brandLogoAnim,
+        brandLogoSize: template.brandLogoSize,
+        brandLogoPosition: template.brandLogoPosition,
+        brandLogoX: template.brandLogoX,
+        brandLogoY: template.brandLogoY,
+        brandHandleText: template.brandHandleText,
+        brandOpacity: template.brandOpacity,
+        showProgressCounter: template.showProgressCounter,
+      },
+      true
+    );
+    showToast('تمت استعادة قالب القناة الافتراضي ✓');
   };
 
   const handleUploadBrandLogo = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -112,95 +238,253 @@ export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
     e.target.value = '';
   };
 
-  const applyQuickLayoutPreset = (mode: 'channel' | 'classicMiddle' | 'transparentOverlay') => {
+  const applyQuickLayoutPreset = (
+    mode: 'channel' | 'centerCircle' | 'classicMiddle' | 'transparentOverlay'
+  ) => {
     if (mode === 'channel') {
-      onChange({
-        ...template,
-        showBadge: false,
-        questionY: 36,
-        questionWidth: 68.6,
-        questionHeightPct: 18.3,
-        questionFontSize: 72,
-        questionBorderRadius: 54,
-        optionsLayout: 'channel2x2',
-        optionsStartY: 51.7,
-        optionsWidth: 100,
-        optionHeight: 148,
-        optionFontSize: 52,
-        optionBorderRadius: 32,
-        optionLabelStyle: 'none',
-        timerStyle: 'channelBox',
-        timerY: 61,
-        revealStyle: 'dimOthers',
-        boxGloss: true,
-      });
+      patch(
+        {
+          freeLayoutMode: false,
+          questionX: 50,
+          questionY: 29,
+          questionWidth: 78,
+          questionHeightPct: 16,
+          questionFontSize: 66,
+          questionBorderRadius: 48,
+          questionBoxOpacity: template.questionBoxOpacity <= 0.05 ? 1 : template.questionBoxOpacity,
+          optionsLayout: 'channel2x2',
+          optionsX: 50,
+          optionsStartY: 51,
+          optionsWidth: 94,
+          optionHeight: 146,
+          optionFontSize: 50,
+          optionBorderRadius: 32,
+          optionBoxOpacity: template.optionBoxOpacity <= 0.05 ? 1 : template.optionBoxOpacity,
+          timerPlacement: 'aboveOptions',
+          timerX: 50,
+          timerY: 43,
+          questionToOptionsGap: 0,
+        },
+        true
+      );
+      showToast('تم تطبيق تخطيط 2×2 (مؤقت أعلى) ✓');
+    } else if (mode === 'centerCircle') {
+      patch(
+        {
+          freeLayoutMode: false,
+          questionX: 50,
+          questionY: 27,
+          questionWidth: 82,
+          questionHeightPct: 15,
+          questionFontSize: 62,
+          questionBorderRadius: 42,
+          questionBoxOpacity: template.questionBoxOpacity <= 0.05 ? 1 : template.questionBoxOpacity,
+          optionsLayout: 'channel2x2',
+          optionsX: 50,
+          optionsStartY: 45,
+          optionsWidth: 94,
+          optionHeight: 142,
+          optionFontSize: 48,
+          optionBorderRadius: 30,
+          optionBoxOpacity: template.optionBoxOpacity <= 0.05 ? 1 : template.optionBoxOpacity,
+          timerStyle: template.timerStyle === 'none' ? 'circle' : template.timerStyle,
+          timerPlacement: 'centerOfOptions',
+          optionsCenterGap: 32,
+          questionToOptionsGap: 18,
+        },
+        true
+      );
+      showToast('تم توسيط المؤقت بين الخيارات ✓');
     } else if (mode === 'classicMiddle') {
-      patch({
-        showBadge: true,
-        badgeY: 10,
-        questionY: 22,
-        questionWidth: 86,
-        questionHeightPct: 0,
-        questionFontSize: 48,
-        questionBorderRadius: 26,
-        timerStyle: 'circle',
-        timerY: 71,
-        optionsLayout: 'vertical',
-        optionsStartY: 36,
-        optionsWidth: 84,
-        optionHeight: 108,
-        optionsGap: 20,
-        optionFontSize: 36,
-        optionBorderRadius: 20,
-        optionLabelStyle: 'arabic',
-        questionBoxOpacity: 0.82,
-        optionBoxOpacity: 0.9,
-        questionBorderWidth: 2,
-        optionBorderWidth: 2,
-      });
+      patch(
+        {
+          freeLayoutMode: false,
+          questionX: 50,
+          questionY: 21,
+          questionWidth: 86,
+          questionHeightPct: 0,
+          questionFontSize: 48,
+          questionBorderRadius: 26,
+          questionBoxOpacity: template.questionBoxOpacity <= 0.05 ? 0.9 : template.questionBoxOpacity,
+          timerPlacement: 'aboveOptions',
+          timerX: 50,
+          timerY: 34,
+          optionsLayout: 'vertical',
+          optionsX: 50,
+          optionsStartY: 43,
+          optionsWidth: 84,
+          optionHeight: 108,
+          optionsGap: 20,
+          optionFontSize: 36,
+          optionBorderRadius: 20,
+          optionBoxOpacity: template.optionBoxOpacity <= 0.05 ? 0.92 : template.optionBoxOpacity,
+        },
+        true
+      );
+      showToast('تم تطبيق القائمة العمودية ✓');
     } else if (mode === 'transparentOverlay') {
-      patch({
-        questionY: 36,
-        questionHeightPct: 0,
-        timerStyle: 'channelBox',
-        timerY: 61,
-        optionsLayout: 'channel2x2',
-        optionsStartY: 51.7,
-        optionHeight: 148,
-        questionBoxOpacity: 0,
-        optionBoxOpacity: 0,
-        questionBorderWidth: 0,
-        optionBorderWidth: 0,
-      });
+      patch(
+        {
+          questionBoxOpacity: 0,
+          optionBoxOpacity: 0,
+          questionBorderWidth: 0,
+          optionBorderWidth: 0,
+        },
+        true
+      );
+      showToast('تم تفعيل النصوص الشفافة ✓');
     }
   };
 
-  const handleSelectPreset = (presetId: TemplateSettings['presetId']) => {
+  const handleSelectPreset = (presetId: PresetId) => {
     if (themeApplyMode === 'bgOnly') {
-      onChange(applyThemeBackgroundOnly(template, presetId));
+      onChange(applyThemeBackgroundOnly(template, presetId), true);
+      showToast('تم تغيير الخلفية مع حفظ تعديلاتك ✓');
     } else {
-      onChange(applyStudioThemePreset(template, presetId));
+      onChange(applyStudioThemePreset(template, presetId), true);
+      showToast('تم تطبيق الثيم الكامل ✓');
     }
   };
 
-  const handleSaveCustomPreset = () => {
-    const updated = saveCustomPreset(presetNameInput, template);
-    setCustomPresets(updated);
+  const handleApplyOneClickStyle = (presetId: PresetId) => {
+    onChange(applyStudioThemePreset(template, presetId), true);
+    showToast('تم تطبيق الستايل بالكامل ✓');
+  };
+
+  const handleSaveCustomPreset = async () => {
+    setStyleError('');
+    const { list, created } = await saveCustomPresetAsync(presetNameInput, template, {
+      includeBrandAndBg: includeMediaInSave,
+      timing: includeTimingInSave ? timing : undefined,
+    });
+    setCustomPresets(list);
+    setActiveCustomId(created.id);
     setPresetNameInput('');
+    showToast(`تم حفظ ستايل "${created.name}" ✓`);
+  };
+
+  const handleUpdateSavedPreset = async (presetId: string) => {
+    setStyleError('');
+    const target = customPresets.find((p) => p.id === presetId);
+    const updatedList = await updateCustomPresetAsync(presetId, template, {
+      includeBrandAndBg: includeMediaInSave,
+      timing: includeTimingInSave ? timing : undefined,
+    });
+    setCustomPresets(updatedList);
+    setActiveCustomId(presetId);
+    showToast(`تم تحديث "${target?.name || 'الستايل'}" بأحدث تعديلاتك ✓`);
   };
 
   const handleApplyCustomPreset = (preset: CustomTemplatePreset) => {
-    onChange({
-      ...DEFAULT_TEMPLATE,
-      ...preset.template,
-      brandLogoDataUrl: template.brandLogoDataUrl,
-      brandLogoName: template.brandLogoName,
-      brandHandleText: template.brandHandleText,
-    });
+    const hasOwnBg = Boolean(preset.template.customBgDataUrl);
+    const hasOwnLogo = Boolean(preset.template.brandLogoDataUrl);
+    onChange(
+      {
+        ...DEFAULT_TEMPLATE,
+        ...preset.template,
+        customBgDataUrl: hasOwnBg ? preset.template.customBgDataUrl : template.customBgDataUrl,
+        customBgName: hasOwnBg ? preset.template.customBgName : template.customBgName,
+        brandLogoDataUrl: hasOwnLogo ? preset.template.brandLogoDataUrl : template.brandLogoDataUrl,
+        brandLogoName: hasOwnLogo ? preset.template.brandLogoName : template.brandLogoName,
+        brandHandleText:
+          preset.template.brandHandleText !== undefined
+            ? preset.template.brandHandleText
+            : template.brandHandleText,
+      },
+      true
+    );
+    if (preset.timing && onTimingChange) {
+      onTimingChange({ ...preset.timing });
+    }
+    setActiveCustomId(preset.id);
+    showToast(`تم تطبيق "${preset.name}" ✓`);
   };
 
-  const handleDeleteCustomPreset = (id: string) => {
-    setCustomPresets(deleteCustomPreset(id));
+  const handleDeleteCustomPreset = async (id: string) => {
+    const next = await deleteCustomPresetAsync(id);
+    setCustomPresets(next);
+    if (activeCustomId === id) setActiveCustomId(null);
+    if (defaultStyleId === id) setDefaultStyleId(null);
+    showToast('تم حذف الستايل');
+  };
+
+  const handleCommitRenamePreset = async (id: string) => {
+    const next = await renameCustomPresetAsync(id, editingPresetName);
+    setCustomPresets(next);
+    setEditingPresetId(null);
+    setEditingPresetName('');
+    showToast('تم تعديل اسم الستايل ✓');
+  };
+
+  const handleToggleDefaultStyle = (id: string) => {
+    const nextId = defaultStyleId === id ? null : id;
+    setDefaultCustomStyleId(nextId);
+    setDefaultStyleId(nextId);
+    showToast(
+      nextId
+        ? 'تم تعيينه كستايل افتراضي لأي مشروع جديد ⭐'
+        : 'تم إلغاء التعيين الافتراضي'
+    );
+  };
+
+  const handleExportCustomPreset = async (preset: CustomTemplatePreset) => {
+    const json = serializeStylePreset(preset);
+    const blob = new Blob([json], { type: 'application/json;charset=utf-8' });
+    const safeName = preset.name.replace(/[^\w\u0600-\u06FF-]+/g, '_') || 'custom-style';
+    await saveOrDownloadBlob(blob, `${safeName}.json`, 'application/json');
+    showToast(`تم تصدير "${preset.name}" ✓`);
+  };
+
+  const handleImportStyleJson = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    setStyleError('');
+    try {
+      const text = await file.text();
+      const { list, imported } = await importCustomStyleFromJson(text);
+      setCustomPresets(list);
+      handleApplyCustomPreset(imported);
+    } catch (err) {
+      setStyleError(err instanceof Error ? err.message : 'تعذر استيراد ملف الستايل.');
+    }
+  };
+
+  const handleStartBlankStyle = () => {
+    setActiveCustomId(null);
+    onChange(
+      {
+        ...DEFAULT_TEMPLATE,
+        aspectRatio: template.aspectRatio,
+        freeLayoutMode: false,
+        backgroundType: 'color',
+        solidBgColor: '#0F172A',
+        bgDimOpacity: 0,
+        boxStyle: 'bevel3d',
+        borderStyle: 'solid',
+        questionBoxColor: '#1E293B',
+        questionTextColor: '#F8FAFC',
+        questionBorderColor: '#38BDF8',
+        questionBorderWidth: 3,
+        optionBoxColor: '#1E293B',
+        optionTextColor: '#F8FAFC',
+        optionBorderColor: '#475569',
+        optionBorderWidth: 2,
+        correctColor: '#00B050',
+        timerMatchBackground: false,
+        timerBgColor: '#0F172A',
+        timerColor: '#38BDF8',
+        timerBorderColor: '#38BDF8',
+        timerBorderWidth: 3,
+        timerStyle: 'circle',
+        timerPlacement: 'centerOfOptions',
+        brandLogoDataUrl: template.brandLogoDataUrl,
+        brandLogoName: template.brandLogoName,
+        brandHandleText: template.brandHandleText,
+      },
+      true
+    );
+    showToast('تم فتح لوحة ستايل نظيفة بطبقات محمية — عدّل واحفظ باسمك ✓');
   };
 
   const handleUploadBg = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -258,67 +542,218 @@ export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
     }
   };
 
+  const SECTION_META: { id: TemplateSectionId; label: string }[] = [
+    { id: 'styles', label: '1. ستايلاتي الخاصة والستايلات الجاهزة' },
+    { id: 'format', label: '2. نوع الفيديو والحرية الكاملة' },
+    { id: 'backdrop', label: '3. ثيمات القناة والخلفية' },
+    { id: 'question', label: '4. الخط ومربع السؤال والشارة' },
+    { id: 'shapes', label: '5. شكل الصناديق والحواف والزوم' },
+    { id: 'options', label: '6. تخطيط الخيارات وألوانها' },
+    { id: 'timer', label: '7. المؤقت وكشف الجواب والتوضيح' },
+    { id: 'introEnd', label: '8. المقدمة (الهوك) وشاشة النهاية' },
+    { id: 'brand', label: '9. شعار القناة والعداد العلوي' },
+  ];
+
+  const renderAccordionHeader = (
+    id: TemplateSectionId,
+    title: string,
+    summary: string,
+    Icon: React.ComponentType<{ className?: string }>
+  ) => {
+    const open = isSectionOpen(id);
+    return (
+      <button
+        type="button"
+        onClick={() => toggleSection(id)}
+        aria-expanded={open}
+        className={`w-full flex items-center justify-between gap-2 px-3.5 py-3 text-right transition-colors cursor-pointer select-none ${
+          open
+            ? 'bg-[#00B050]/12 text-[var(--ptxt)]'
+            : 'bg-[var(--surface)]/75 hover:bg-[var(--surface)] text-[var(--ptxt)]'
+        }`}
+      >
+        <div className="flex items-center gap-2 min-w-0">
+          <Icon className={`w-4 h-4 shrink-0 ${open ? 'text-[#00B050]' : 'text-[var(--gold)]'}`} />
+          <span className="text-xs sm:text-sm font-extrabold truncate">{title}</span>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          {summary && (
+            <span className="text-[10px] font-bold px-2 py-0.5 rounded-md bg-[var(--panel)] border border-[var(--pline)] text-[var(--pmuted)] max-w-[125px] truncate">
+              {summary}
+            </span>
+          )}
+          <ChevronDown
+            className={`w-4 h-4 text-[var(--pmuted)] transition-transform duration-200 ${
+              open ? 'rotate-180 text-[#00B050]' : ''
+            }`}
+          />
+        </div>
+      </button>
+    );
+  };
+
   return (
-    <div className="flex flex-col gap-6">
-      {/* 0. Video Format / Aspect Ratio */}
-      <section className="flex flex-col gap-2">
-        <span className="text-sm font-bold text-[var(--ptxt)]">نوع الفيديو والأبعاد</span>
-        <div className="grid grid-cols-2 gap-2">
+    <div className="flex flex-col gap-3 pb-4">
+      {/* Sticky Top Bar: Feedback + Undo/Redo + Quick Dropdown Navigator */}
+      <div className="sticky top-0 z-20 -mx-1 px-1 py-2 bg-[var(--panel)]/95 backdrop-blur-sm border-b border-[var(--pline)] flex flex-col gap-2">
+        {(appliedNotice || onUndo || onRedo) && (
+          <div className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-xl bg-[var(--surface)] border border-[var(--pline)]">
+            <div className="flex items-center gap-1.5 text-[11px] font-bold min-w-0">
+              {appliedNotice ? (
+                <span className="flex items-center gap-1 text-[#00B050] dark:text-[#6ee7b7] truncate">
+                  <Check className="w-3.5 h-3.5 shrink-0" />
+                  <span>{appliedNotice}</span>
+                </span>
+              ) : (
+                <span className="text-[var(--pmuted)] truncate">
+                  كل تعديل يُحفظ ويثبت فوراً
+                </span>
+              )}
+            </div>
+            {(onUndo || onRedo) && (
+              <div className="flex items-center gap-1 shrink-0">
+                <button
+                  type="button"
+                  onClick={onUndo}
+                  disabled={!canUndo}
+                  title="تراجع خطوة للخلف (Ctrl+Z)"
+                  className="flex items-center gap-1 px-2 py-1 rounded-md bg-[var(--panel)] border border-[var(--pline)] text-[11px] font-bold text-[var(--ptxt)] disabled:opacity-35 hover:border-[#00B050] cursor-pointer disabled:cursor-default"
+                >
+                  <Undo2 className="w-3 h-3" />
+                  <span>تراجع</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={onRedo}
+                  disabled={!canRedo}
+                  title="إعادة الخطوة (Ctrl+Y)"
+                  className="flex items-center gap-1 px-2 py-1 rounded-md bg-[var(--panel)] border border-[var(--pline)] text-[11px] font-bold text-[var(--ptxt)] disabled:opacity-35 hover:border-[#00B050] cursor-pointer disabled:cursor-default"
+                >
+                  <Redo2 className="w-3 h-3" />
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Quick Section Selector Dropdown */}
+        <div className="flex items-center gap-1.5">
+          <select
+            aria-label="الانتقال السريع لأقسام القالب"
+            value={openSection || ''}
+            onChange={(e) => {
+              const val = e.target.value as TemplateSectionId;
+              if (val) jumpToSection(val);
+            }}
+            className="flex-1 min-w-0 px-3 py-2 rounded-xl bg-[var(--surface)] border border-[#00B050]/45 text-xs font-bold text-[var(--ptxt)] focus:border-[#00B050] focus:outline-none cursor-pointer"
+          >
+            <option value="" disabled>
+              اختر قسماً للتعديل السريع...
+            </option>
+            {SECTION_META.map((sec) => (
+              <option key={sec.id} value={sec.id}>
+                {sec.label}
+              </option>
+            ))}
+          </select>
+
           <button
             type="button"
-            onClick={() => patch({ aspectRatio: '9:16' })}
-            className={`flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl border text-xs font-bold transition-colors cursor-pointer ${
-              template.aspectRatio !== '16:9'
-                ? 'bg-[#00B050]/18 border-[#00B050] text-[#00B050] dark:text-[#6ee7b7]'
-                : 'bg-[var(--surface)] border-[var(--pline)] text-[var(--ptxt)] hover:border-[var(--gold)]'
-            }`}
+            onClick={() => setExpandAllSections((v) => !v)}
+            className="px-2.5 py-2 rounded-xl bg-[var(--surface)] border border-[var(--pline)] hover:border-[var(--gold)] text-[11px] font-bold text-[var(--ptxt)] whitespace-nowrap shrink-0 cursor-pointer"
           >
-            <Smartphone className="w-4 h-4" />
-            <span>شورتس 9:16 عمودي</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => patch({ aspectRatio: '16:9' })}
-            className={`flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl border text-xs font-bold transition-colors cursor-pointer ${
-              template.aspectRatio === '16:9'
-                ? 'bg-[#00B050]/18 border-[#00B050] text-[#00B050] dark:text-[#6ee7b7]'
-                : 'bg-[var(--surface)] border-[var(--pline)] text-[var(--ptxt)] hover:border-[var(--gold)]'
-            }`}
-          >
-            <Monitor className="w-4 h-4" />
-            <span>فيديو طويل 16:9 أفقي</span>
+            {expandAllSections ? 'طي الكل' : 'فتح الكل'}
           </button>
         </div>
-      </section>
+      </div>
 
-      {/* Quick Channel Layout & Style Bar */}
-      <section className="flex flex-col gap-2.5 border-t border-[var(--pline)] pt-5">
+      {/* Section 1: Custom Saved Styles + One-Click Styles + Quick Layouts */}
+      <section
+        ref={(el) => {
+          sectionRefs.current.styles = el;
+        }}
+        className={`rounded-xl border overflow-hidden transition-colors ${
+          isSectionOpen('styles') ? 'border-[#00B050]/55 bg-[var(--panel)]' : 'border-[var(--pline)]'
+        }`}
+      >
+        {renderAccordionHeader(
+          'styles',
+          '1. ستايلاتي الخاصة والستايلات الجاهزة',
+          customPresets.length > 0 ? `${customPresets.length} محفوظ` : 'تصميم وحفظ',
+          BookmarkPlus
+        )}
+        {isSectionOpen('styles') && (
+          <div className="p-3.5 border-t border-[var(--pline)] flex flex-col gap-3">
         <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-1.5 text-sm font-bold text-[var(--ptxt)]">
-            <LayoutTemplate className="w-4 h-4 text-[var(--gold)]" />
-            <span>تخطيطات الشاشة الجاهزة</span>
+          <div className="flex items-center gap-1.5 text-xs font-bold text-[var(--ptxt)]">
+            <Sparkles className="w-3.5 h-3.5 text-[var(--gold)]" />
+            <span>ستايلات متكاملة بكبسة زر</span>
           </div>
           <button
             type="button"
             onClick={applyChannelPreset}
             className="flex items-center gap-1 px-2.5 py-1 rounded-md bg-[#00B050] hover:bg-[#00c85b] text-white text-[11px] font-bold transition-colors cursor-pointer"
           >
-            <Sparkles className="w-3 h-3" />
-            <span>استعادة قالب القناة</span>
+            <RotateCcw className="w-3 h-3" />
+            <span>الافتراضي</span>
           </button>
         </div>
 
-        <div className="grid grid-cols-3 gap-2">
+        <div className="grid grid-cols-3 gap-1.5">
+          {ONE_CLICK_STYLES.map((st) => {
+            const active = template.backgroundType === 'preset' && template.presetId === st.id;
+            return (
+              <button
+                key={st.id}
+                type="button"
+                onClick={() => handleApplyOneClickStyle(st.id)}
+                className={`flex items-center justify-center gap-1.5 px-2 py-2 rounded-lg border text-[11px] font-bold transition-colors cursor-pointer ${
+                  active
+                    ? 'bg-[#00B050]/18 border-[#00B050] text-[#00B050] dark:text-[#6ee7b7]'
+                    : 'bg-[var(--surface)] border-[var(--pline)] text-[var(--ptxt)] hover:border-[var(--gold)]'
+                }`}
+              >
+                <span
+                  className="w-2.5 h-2.5 rounded-full shrink-0 border border-white/30"
+                  style={{ backgroundColor: st.accent }}
+                />
+                <span className="truncate">{st.emoji} {st.label}</span>
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="flex items-center justify-between gap-2 pt-1">
+          <div className="flex items-center gap-1.5 text-xs font-bold text-[var(--ptxt)]">
+            <LayoutTemplate className="w-3.5 h-3.5 text-[var(--gold)]" />
+            <span>تخطيط الترتيب فقط (يحفظ ألوانك وستايلك)</span>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-2">
           <button
             type="button"
             onClick={() => applyQuickLayoutPreset('channel')}
             className={`px-2 py-2 rounded-lg border text-[11px] font-bold transition-colors cursor-pointer ${
-              template.optionsLayout === 'channel2x2' && template.questionBoxOpacity > 0
+              template.optionsLayout === 'channel2x2' &&
+              (template.timerPlacement || 'aboveOptions') === 'aboveOptions' &&
+              template.questionBoxOpacity > 0
                 ? 'bg-[#00B050]/18 border-[#00B050] text-[#00B050] dark:text-[#6ee7b7]'
                 : 'bg-[var(--surface)] border-[var(--pline)] text-[var(--ptxt)] hover:border-[var(--gold)]'
             }`}
           >
-            شبكة القناة 2×2
+            شبكة القناة 2×2 (مؤقت أعلى)
+          </button>
+          <button
+            type="button"
+            onClick={() => applyQuickLayoutPreset('centerCircle')}
+            className={`px-2 py-2 rounded-lg border text-[11px] font-bold transition-colors cursor-pointer ${
+              template.timerPlacement === 'centerOfOptions'
+                ? 'bg-[#00B050]/18 border-[#00B050] text-[#00B050] dark:text-[#6ee7b7]'
+                : 'bg-[var(--surface)] border-[var(--pline)] text-[var(--ptxt)] hover:border-[var(--gold)]'
+            }`}
+          >
+            المؤقت في منتصف الخيارات 🎯
           </button>
           <button
             type="button"
@@ -334,77 +769,455 @@ export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
           <button
             type="button"
             onClick={() => applyQuickLayoutPreset('transparentOverlay')}
-            className="px-2 py-2 rounded-lg bg-[var(--surface)] hover:border-[var(--gold)] border border-[var(--pline)] text-[11px] font-semibold text-[var(--sand)] transition-colors cursor-pointer"
+            className={`px-2 py-2 rounded-lg border text-[11px] font-semibold transition-colors cursor-pointer ${
+              template.questionBoxOpacity === 0 && template.optionBoxOpacity === 0
+                ? 'bg-[#00B050]/18 border-[#00B050] text-[#00B050] dark:text-[#6ee7b7]'
+                : 'bg-[var(--surface)] hover:border-[var(--gold)] border-[var(--pline)] text-[var(--sand)]'
+            }`}
           >
             شفاف فوق صورتك
           </button>
         </div>
 
-        {/* Custom Saved User Presets */}
-        <div className="mt-2 p-3 rounded-xl bg-[var(--surface)] border border-[var(--pline)] flex flex-col gap-2">
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-xs font-bold text-[var(--ptxt)]">قوالبي الخاصة (حفظ واسترجاع)</span>
-            <span className="text-[10px] text-[var(--pmuted)]">{customPresets.length} محفوظ</span>
+        {/* Custom Style Builder & Persistent Vault */}
+        <div className="mt-1 p-3.5 rounded-xl bg-[var(--surface)] border border-[#00B050]/45 flex flex-col gap-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-1.5">
+              <BookmarkPlus className="w-4 h-4 text-[#00B050]" />
+              <span className="text-xs font-extrabold text-[var(--ptxt)]">
+                ستايلاتي الخاصة (صمّم واحفظ للأبد)
+              </span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={handleStartBlankStyle}
+                title="بدء ستايل حر من الصفر بألوان نظيفة ووضع حرية كاملة"
+                className="flex items-center gap-1 px-2 py-1 rounded-md bg-[var(--panel)] border border-[var(--pline)] hover:border-[var(--gold)] text-[10px] font-bold text-[var(--gold)] cursor-pointer"
+              >
+                <Wand2 className="w-3 h-3" />
+                <span>ستايل من الصفر</span>
+              </button>
+              <input
+                ref={styleJsonInputRef}
+                type="file"
+                accept=".json,application/json"
+                onChange={(e) => void handleImportStyleJson(e)}
+                className="hidden"
+              />
+              <button
+                type="button"
+                onClick={() => styleJsonInputRef.current?.click()}
+                title="استيراد ستايل محفوظ من ملف JSON"
+                className="flex items-center gap-1 px-2 py-1 rounded-md bg-[var(--panel)] border border-[var(--pline)] hover:border-[#00B050] text-[10px] font-bold text-[var(--ptxt)] cursor-pointer"
+              >
+                <Upload className="w-3 h-3 text-[#00B050]" />
+                <span>استيراد</span>
+              </button>
+            </div>
           </div>
-          <div className="flex items-center gap-1.5">
-            <input
-              type="text"
-              value={presetNameInput}
-              onChange={(e) => setPresetNameInput(e.target.value)}
-              placeholder="اسم القالب لحفظه (مثال: قالب قناتي الذهبي)"
-              className="flex-1 min-w-0 px-2.5 py-1.5 rounded-lg bg-[var(--panel)] border border-[var(--pline)] text-xs text-[var(--ptxt)] placeholder:text-[var(--pmuted)] focus:border-[#00B050] focus:outline-none"
-            />
-            <button
-              type="button"
-              onClick={handleSaveCustomPreset}
-              className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-[#00B050] hover:bg-[#00c85b] text-white text-[11px] font-bold whitespace-nowrap cursor-pointer"
-            >
-              <BookmarkPlus className="w-3.5 h-3.5" />
-              <span>حفظ الحالي</span>
-            </button>
+
+          {/* Live Current Style Swatch Summary */}
+          <div className="flex items-center justify-between gap-2 px-2.5 py-2 rounded-lg bg-[var(--panel)] border border-[var(--pline)]">
+            <div className="flex items-center gap-2 min-w-0">
+              <div className="flex items-center -space-x-1 rtl:space-x-reverse shrink-0">
+                <span
+                  className="w-5 h-5 rounded-md border border-white/25 shadow-sm"
+                  style={{
+                    backgroundColor:
+                      template.backgroundType === 'color'
+                        ? template.solidBgColor
+                        : '#1f2937',
+                    backgroundImage:
+                      template.backgroundType === 'custom' && template.customBgDataUrl
+                        ? `url(${template.customBgDataUrl})`
+                        : undefined,
+                    backgroundSize: 'cover',
+                  }}
+                  title="لون/خلفية الستايل الحالي"
+                />
+                <span
+                  className="w-5 h-5 rounded-md border-2 shadow-sm"
+                  style={{
+                    backgroundColor: template.questionBoxColor,
+                    borderColor: template.questionBorderColor,
+                  }}
+                  title="صندوق السؤال"
+                />
+                <span
+                  className="w-5 h-5 rounded-md border-2 shadow-sm"
+                  style={{
+                    backgroundColor: template.optionBoxColor,
+                    borderColor: template.optionBorderColor,
+                  }}
+                  title="صناديق الخيارات"
+                />
+                <span
+                  className="w-4 h-4 rounded-full border border-white/40"
+                  style={{ backgroundColor: template.correctColor }}
+                  title="لون الإجابة الصحيحة"
+                />
+              </div>
+              <div className="flex flex-col min-w-0">
+                <span className="text-[11px] font-bold text-[var(--ptxt)] truncate">
+                  {activeCustomId
+                    ? `تعديل: ${customPresets.find((c) => c.id === activeCustomId)?.name || 'ستايل مخصص'}`
+                    : 'الستايل الحالي جاهز للحفظ'}
+                </span>
+                <span className="text-[10px] text-[var(--pmuted)] truncate">
+                  {template.fontFamily} · {template.boxStyle || 'flat'} · {template.aspectRatio}
+                  {template.freeLayoutMode ? ' · حرية كاملة' : ''}
+                </span>
+              </div>
+            </div>
+            {activeCustomId && customPresets.some((c) => c.id === activeCustomId) && (
+              <button
+                type="button"
+                onClick={() => void handleUpdateSavedPreset(activeCustomId)}
+                className="flex items-center gap-1 px-2 py-1 rounded-md bg-[#00B050]/18 border border-[#00B050] text-[#00B050] dark:text-[#6ee7b7] text-[10px] font-bold shrink-0 cursor-pointer"
+              >
+                <RefreshCw className="w-3 h-3" />
+                <span>تحديث</span>
+              </button>
+            )}
           </div>
-          {customPresets.length > 0 && (
-            <div className="flex flex-wrap gap-1.5 pt-1">
-              {customPresets.map((cp) => (
-                <div
-                  key={cp.id}
-                  className="inline-flex items-center gap-1 rounded-lg bg-[var(--panel)] border border-[var(--pline)] hover:border-[var(--gold)] overflow-hidden"
-                >
-                  <button
-                    type="button"
-                    onClick={() => handleApplyCustomPreset(cp)}
-                    className="px-2.5 py-1 text-[11px] font-bold text-[var(--ptxt)] cursor-pointer"
-                  >
-                    {cp.name}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleDeleteCustomPreset(cp.id)}
-                    title="حذف القالب"
-                    className="px-1.5 py-1 text-[var(--pmuted)] hover:text-rose-400 cursor-pointer"
-                  >
-                    <X className="w-3 h-3" />
-                  </button>
-                </div>
-              ))}
+
+          {/* Save Input + Options */}
+          <div className="flex flex-col gap-1.5">
+            <div className="flex items-center gap-1.5">
+              <input
+                type="text"
+                value={presetNameInput}
+                onChange={(e) => setPresetNameInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    void handleSaveCustomPreset();
+                  }
+                }}
+                placeholder="سمِّ ستايلك لحفظه (مثال: ستايلي الذهبي)"
+                className="flex-1 min-w-0 px-2.5 py-1.5 rounded-lg bg-[var(--panel)] border border-[var(--pline)] text-xs text-[var(--ptxt)] placeholder:text-[var(--pmuted)] focus:border-[#00B050] focus:outline-none"
+              />
+              <button
+                type="button"
+                onClick={() => void handleSaveCustomPreset()}
+                className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-[#00B050] hover:bg-[#00c85b] text-white text-[11px] font-bold whitespace-nowrap cursor-pointer shrink-0"
+              >
+                <BookmarkPlus className="w-3.5 h-3.5" />
+                <span>حفظ ستايلي</span>
+              </button>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-3 text-[10px] text-[var(--pmuted)] px-0.5">
+              <label className="flex items-center gap-1.5 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={includeMediaInSave}
+                  onChange={(e) => setIncludeMediaInSave(e.target.checked)}
+                  className="w-3.5 h-3.5 accent-[#00B050] rounded"
+                />
+                <span>حفظ صورة الخلفية والشعار</span>
+              </label>
+              {timing && (
+                <label className="flex items-center gap-1.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={includeTimingInSave}
+                    onChange={(e) => setIncludeTimingInSave(e.target.checked)}
+                    className="w-3.5 h-3.5 accent-[#00B050] rounded"
+                  />
+                  <span>حفظ أوقات المؤقت والمراحل أيضاً</span>
+                </label>
+              )}
+            </div>
+          </div>
+
+          {styleError && (
+            <div className="px-2.5 py-1.5 rounded-lg bg-rose-500/10 border border-rose-500/30 text-[11px] text-rose-300">
+              {styleError}
             </div>
           )}
-        </div>
+
+          {/* Saved Custom Styles Cards */}
+          {customPresets.length === 0 ? (
+            <div className="text-[11px] text-[var(--pmuted)] text-center py-2 border border-dashed border-[var(--pline)] rounded-lg">
+              صمّم ألوانك ومواضعك من الأسفل أو اسحب العناصر على الشاشة ثم اضغط «حفظ ستايلي» ليظهر هنا دائماً.
+            </div>
+          ) : (
+            <div className="flex flex-col gap-2 max-h-60 overflow-y-auto pr-0.5">
+              {customPresets.map((cp) => {
+                const isApplied = activeCustomId === cp.id;
+                const isDefault = defaultStyleId === cp.id;
+                const isEditing = editingPresetId === cp.id;
+                const bgSw =
+                  cp.template.backgroundType === 'color'
+                    ? cp.template.solidBgColor || '#0f172a'
+                    : '#1e293b';
+
+                return (
+                  <div
+                    key={cp.id}
+                    className={`flex items-center justify-between gap-2 p-2 rounded-xl border transition-colors ${
+                      isApplied
+                        ? 'bg-[#00B050]/12 border-[#00B050]'
+                        : 'bg-[var(--panel)] border-[var(--pline)] hover:border-[var(--gold)]'
+                    }`}
+                  >
+                    {isEditing ? (
+                      <div className="flex items-center gap-1.5 flex-1 min-w-0">
+                        <input
+                          type="text"
+                          value={editingPresetName}
+                          onChange={(e) => setEditingPresetName(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') void handleCommitRenamePreset(cp.id);
+                            if (e.key === 'Escape') setEditingPresetId(null);
+                          }}
+                          autoFocus
+                          className="flex-1 min-w-0 px-2 py-1 rounded bg-[var(--surface)] border border-[#00B050] text-xs text-[var(--ptxt)] focus:outline-none"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => void handleCommitRenamePreset(cp.id)}
+                          className="p-1 rounded bg-[#00B050] text-white cursor-pointer"
+                          title="حفظ الاسم"
+                        >
+                          <Check className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setEditingPresetId(null)}
+                          className="p-1 rounded bg-[var(--surface)] text-[var(--pmuted)] cursor-pointer"
+                          title="إلغاء"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    ) : (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => handleApplyCustomPreset(cp)}
+                          className="flex items-center gap-2 flex-1 min-w-0 text-right cursor-pointer"
+                        >
+                          <div className="flex items-center -space-x-1 rtl:space-x-reverse shrink-0">
+                            <span
+                              className="w-5 h-5 rounded border border-white/25"
+                              style={{
+                                backgroundColor: bgSw,
+                                backgroundImage: cp.template.customBgDataUrl
+                                  ? `url(${cp.template.customBgDataUrl})`
+                                  : undefined,
+                                backgroundSize: 'cover',
+                              }}
+                            />
+                            <span
+                              className="w-4 h-4 rounded border"
+                              style={{
+                                backgroundColor: cp.template.questionBoxColor || '#1e293b',
+                                borderColor: cp.template.questionBorderColor || '#EDD6A2',
+                              }}
+                            />
+                            <span
+                              className="w-4 h-4 rounded border"
+                              style={{
+                                backgroundColor: cp.template.optionBoxColor || '#1e293b',
+                                borderColor: cp.template.correctColor || '#00B050',
+                              }}
+                            />
+                          </div>
+
+                          <div className="flex flex-col min-w-0">
+                            <div className="flex items-center gap-1 min-w-0">
+                              <span className="text-xs font-bold text-[var(--ptxt)] truncate">
+                                {cp.name}
+                              </span>
+                              {isDefault && (
+                                <span className="text-[9px] px-1 py-0.5 rounded bg-[var(--gold)]/20 text-[var(--gold)] font-bold shrink-0">
+                                  افتراضي
+                                </span>
+                              )}
+                            </div>
+                            <span className="text-[10px] text-[var(--pmuted)] truncate">
+                              {cp.template.aspectRatio || '9:16'}
+                              {cp.template.boxStyle ? ` · ${cp.template.boxStyle}` : ''}
+                              {cp.timing ? ' · مع التوقيت' : ''}
+                            </span>
+                          </div>
+                        </button>
+
+                        <div className="flex items-center gap-0.5 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => handleToggleDefaultStyle(cp.id)}
+                            title={
+                              isDefault
+                                ? 'إلغاء التعيين كافتراضي للمشاريع الجديدة'
+                                : 'تعيين كستايل افتراضي لأي مشروع جديد'
+                            }
+                            className={`p-1.5 rounded-md cursor-pointer ${
+                              isDefault
+                                ? 'text-[var(--gold)] bg-[var(--gold)]/15'
+                                : 'text-[var(--pmuted)] hover:text-[var(--gold)]'
+                            }`}
+                          >
+                            <Star className={`w-3.5 h-3.5 ${isDefault ? 'fill-current' : ''}`} />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleUpdateSavedPreset(cp.id)}
+                            title="تحديث هذا الستايل بالتعديلات الحالية"
+                            className="p-1.5 rounded-md text-[var(--pmuted)] hover:text-[#00B050] cursor-pointer"
+                          >
+                            <RefreshCw className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEditingPresetId(cp.id);
+                              setEditingPresetName(cp.name);
+                            }}
+                            title="إعادة تسمية"
+                            className="p-1.5 rounded-md text-[var(--pmuted)] hover:text-[var(--ptxt)] cursor-pointer"
+                          >
+                            <Pencil className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleExportCustomPreset(cp)}
+                            title="تصدير كملف JSON للنسخ الاحتياطي"
+                            className="p-1.5 rounded-md text-[var(--pmuted)] hover:text-[var(--ptxt)] cursor-pointer"
+                          >
+                            <Download className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleDeleteCustomPreset(cp.id)}
+                            title="حذف الستايل"
+                            className="p-1.5 rounded-md text-[var(--pmuted)] hover:text-rose-400 cursor-pointer"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          </div>
+          </div>
+        )}
       </section>
 
-      {/* 1. Channel Themes & Background */}
-      <section className="flex flex-col gap-3 border-t border-[var(--pline)] pt-5">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <h2 className="text-sm font-bold text-[var(--ptxt)]">
-            1. ثيمات القناة والخلفية ({template.aspectRatio === '16:9' ? '16:9' : '9:16'})
-          </h2>
-        </div>
+      {/* Section 2: Video Format + Free Layout Mode Toggle */}
+      <section
+        ref={(el) => {
+          sectionRefs.current.format = el;
+        }}
+        className={`rounded-xl border overflow-hidden transition-colors ${
+          isSectionOpen('format') ? 'border-[#00B050]/55 bg-[var(--panel)]' : 'border-[var(--pline)]'
+        }`}
+      >
+        {renderAccordionHeader(
+          'format',
+          '2. نوع الفيديو والحرية الكاملة',
+          `${template.aspectRatio === '16:9' ? '16:9 أفقي' : '9:16 شورتس'}${
+            template.freeLayoutMode ? ' · حر' : ''
+          }`,
+          template.aspectRatio === '16:9' ? Monitor : Smartphone
+        )}
+        {isSectionOpen('format') && (
+          <div className="p-3.5 border-t border-[var(--pline)] flex flex-col gap-3">
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => patch({ aspectRatio: '9:16' })}
+                className={`flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl border text-xs font-bold transition-colors cursor-pointer ${
+                  template.aspectRatio !== '16:9'
+                    ? 'bg-[#00B050]/18 border-[#00B050] text-[#00B050] dark:text-[#6ee7b7]'
+                    : 'bg-[var(--surface)] border-[var(--pline)] text-[var(--ptxt)] hover:border-[var(--gold)]'
+                }`}
+              >
+                <Smartphone className="w-4 h-4" />
+                <span>شورتس 9:16 عمودي</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => patch({ aspectRatio: '16:9' })}
+                className={`flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl border text-xs font-bold transition-colors cursor-pointer ${
+                  template.aspectRatio === '16:9'
+                    ? 'bg-[#00B050]/18 border-[#00B050] text-[#00B050] dark:text-[#6ee7b7]'
+                    : 'bg-[var(--surface)] border-[var(--pline)] text-[var(--ptxt)] hover:border-[var(--gold)]'
+                }`}
+              >
+                <Monitor className="w-4 h-4" />
+                <span>فيديو طويل 16:9 أفقي</span>
+              </button>
+            </div>
 
-        {/* Freedom Mode Switch: Apply Backdrop Only vs Full Theme Override */}
+            <label
+              className={`flex items-start gap-3 p-3 rounded-xl border transition-colors cursor-pointer ${
+                template.freeLayoutMode
+                  ? 'bg-[#00B050]/14 border-[#00B050]'
+                  : 'bg-[var(--surface)] border-[var(--pline)] hover:border-[var(--gold)]'
+              }`}
+            >
+              <input
+                type="checkbox"
+                checked={Boolean(template.freeLayoutMode)}
+                onChange={(e) => {
+                  patch({ freeLayoutMode: e.target.checked });
+                  showToast(
+                    e.target.checked
+                      ? 'تم تفعيل وضع الحرية الكاملة ✓'
+                      : 'تم تفعيل الترتيب التلقائي ✓'
+                  );
+                }}
+                className="mt-0.5 w-4 h-4 accent-[#00B050] rounded cursor-pointer shrink-0"
+              />
+              <div className="flex flex-col gap-0.5 flex-1">
+                <div className="flex items-center gap-1.5 text-xs font-bold text-[var(--ptxt)]">
+                  <Unlock className="w-3.5 h-3.5 text-[#00B050]" />
+                  <span>تخطي حماية الطبقات (حرية مطلقة حتى مع التداخل)</span>
+                </div>
+                <span className="text-[11px] text-[var(--pmuted)] leading-relaxed">
+                  في الوضع الافتراضي كل عنصر يعمل في طبقة مستقلة لمنع التداخل تماماً. فعّل هذا الخيار فقط إذا أردت تراكب العناصر فوق بعضها يدوياً.
+                </span>
+              </div>
+            </label>
+          </div>
+        )}
+      </section>
+
+      {/* Section 3: Channel Themes & Background */}
+      <section
+        ref={(el) => {
+          sectionRefs.current.backdrop = el;
+        }}
+        className={`rounded-xl border overflow-hidden transition-colors ${
+          isSectionOpen('backdrop') ? 'border-[#00B050]/55 bg-[var(--panel)]' : 'border-[var(--pline)]'
+        }`}
+      >
+        {renderAccordionHeader(
+          'backdrop',
+          '3. ثيمات القناة والخلفية',
+          template.backgroundType === 'custom'
+            ? 'صورة مخصصة'
+            : template.backgroundType === 'color'
+              ? 'لون ثابت'
+              : PRESET_BACKDROPS.find((b) => b.id === template.presetId)?.label || 'ثيم',
+          Palette
+        )}
+        {isSectionOpen('backdrop') && (
+          <div className="p-3.5 border-t border-[var(--pline)] flex flex-col gap-3">
+
+        {/* Persistent Mode Switch: Apply Backdrop Only vs Full Theme Override */}
         <div className="grid grid-cols-2 gap-1.5 p-1 rounded-xl bg-[var(--surface)] border border-[var(--pline)]">
           <button
             type="button"
-            onClick={() => setThemeApplyMode('bgOnly')}
+            onClick={() => patch({ themeApplyMode: 'bgOnly' })}
             className={`px-2 py-1.5 rounded-lg text-[11px] font-bold transition-colors cursor-pointer ${
               themeApplyMode === 'bgOnly'
                 ? 'bg-[#00B050] text-white'
@@ -415,7 +1228,7 @@ export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
           </button>
           <button
             type="button"
-            onClick={() => setThemeApplyMode('full')}
+            onClick={() => patch({ themeApplyMode: 'full' })}
             className={`px-2 py-1.5 rounded-lg text-[11px] font-bold transition-colors cursor-pointer ${
               themeApplyMode === 'full'
                 ? 'bg-[var(--gold)] text-[#0c0c0c]'
@@ -528,11 +1341,16 @@ export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
               type="color"
               value={template.solidBgColor}
               onChange={(e) =>
-                patch({
-                  backgroundType: 'color',
-                  solidBgColor: e.target.value,
-                  timerBgColor: e.target.value,
-                })
+                patch(
+                  {
+                    backgroundType: 'color',
+                    solidBgColor: e.target.value,
+                    ...(template.timerMatchBackground !== false
+                      ? { timerBgColor: e.target.value }
+                      : {}),
+                  },
+                  false
+                )
               }
               className="w-7 h-7 rounded bg-transparent border-0 cursor-pointer"
             />
@@ -549,7 +1367,7 @@ export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
               max={0.75}
               step={0.05}
               value={template.bgDimOpacity}
-              onChange={(e) => patch({ bgDimOpacity: parseFloat(e.target.value) })}
+              onChange={(e) => patch({ bgDimOpacity: parseFloat(e.target.value) }, false)}
               className="w-full h-1"
             />
           </label>
@@ -568,34 +1386,70 @@ export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
             <option value="zoomAndParticles">زوم سينمائي + جزيئات ضوئية معاً</option>
           </select>
         </label>
+          </div>
+        )}
       </section>
 
-      {/* 2. Font & Question Box */}
-      <section className="flex flex-col gap-3 border-t border-[var(--pline)] pt-5">
-        <h2 className="text-sm font-bold text-[var(--ptxt)]">2. الخط ومربع السؤال</h2>
+      {/* Section 4: Font, Question Box & Top Badge */}
+      <section
+        ref={(el) => {
+          sectionRefs.current.question = el;
+        }}
+        className={`rounded-xl border overflow-hidden transition-colors ${
+          isSectionOpen('question') ? 'border-[#00B050]/55 bg-[var(--panel)]' : 'border-[var(--pline)]'
+        }`}
+      >
+        {renderAccordionHeader(
+          'question',
+          '4. الخط ومربع السؤال والشارة',
+          `${template.fontFamily} · ${template.questionFontSize}px`,
+          Type
+        )}
+        {isSectionOpen('question') && (
+          <div className="p-3.5 border-t border-[var(--pline)] flex flex-col gap-3">
+            <div className="flex items-center justify-end">
+              <button
+                type="button"
+                onClick={() =>
+                  patch({
+                    questionX: DEFAULT_TEMPLATE.questionX,
+                    questionY: DEFAULT_TEMPLATE.questionY,
+                    questionWidth: DEFAULT_TEMPLATE.questionWidth,
+                    questionHeightPct: DEFAULT_TEMPLATE.questionHeightPct,
+                    questionFontSize: DEFAULT_TEMPLATE.questionFontSize,
+                    questionTextAlign: 'center',
+                    questionBorderWidth: DEFAULT_TEMPLATE.questionBorderWidth,
+                    questionBorderRadius: DEFAULT_TEMPLATE.questionBorderRadius,
+                  })
+                }
+                className="text-[11px] font-bold text-[var(--pmuted)] hover:text-[#00B050] cursor-pointer"
+              >
+                تصفير أبعاد السؤال
+              </button>
+            </div>
 
-        <div className="grid grid-cols-2 gap-2.5">
+        <div className="grid grid-cols-3 gap-2">
           <label className="flex flex-col gap-1">
-            <span className="text-xs text-[var(--pmuted)]">نوع الخط العربي</span>
+            <span className="text-xs text-[var(--pmuted)]">نوع الخط</span>
             <select
               value={template.fontFamily}
               onChange={(e) =>
                 patch({ fontFamily: e.target.value as TemplateSettings['fontFamily'] })
               }
-              className="px-3 py-2 rounded-lg bg-[var(--surface)] border border-[var(--pline)] text-xs text-[var(--ptxt)] focus:border-[#00B050] focus:outline-none"
+              className="px-2.5 py-2 rounded-lg bg-[var(--surface)] border border-[var(--pline)] text-xs text-[var(--ptxt)] focus:border-[#00B050] focus:outline-none"
             >
-              <option value="Cairo">خط القاهرة (Cairo)</option>
-              <option value="Tajawal">خط تجوال (Tajawal)</option>
-              <option value="Amiri">خط أميري الكلاسيكي (Amiri)</option>
+              <option value="Cairo">القاهرة (Cairo)</option>
+              <option value="Tajawal">تجوال (Tajawal)</option>
+              <option value="Amiri">أميري (Amiri)</option>
             </select>
           </label>
 
           <label className="flex flex-col gap-1">
-            <span className="text-xs text-[var(--pmuted)]">حركة دخول السؤال</span>
+            <span className="text-xs text-[var(--pmuted)]">دخول السؤال</span>
             <select
               value={template.questionAnim}
               onChange={(e) => patch({ questionAnim: e.target.value as AnimationStyle })}
-              className="px-3 py-2 rounded-lg bg-[var(--surface)] border border-[var(--pline)] text-xs text-[var(--ptxt)] focus:border-[#00B050] focus:outline-none"
+              className="px-2.5 py-2 rounded-lg bg-[var(--surface)] border border-[var(--pline)] text-xs text-[var(--ptxt)] focus:border-[#00B050] focus:outline-none"
             >
               {ANIM_OPTIONS.map((a) => (
                 <option key={a.id} value={a.id}>
@@ -604,36 +1458,51 @@ export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
               ))}
             </select>
           </label>
+
+          <label className="flex flex-col gap-1">
+            <span className="text-xs text-[var(--pmuted)]">محاذاة النص</span>
+            <select
+              value={template.questionTextAlign || 'center'}
+              onChange={(e) =>
+                patch({ questionTextAlign: e.target.value as QuestionTextAlign })
+              }
+              className="px-2.5 py-2 rounded-lg bg-[var(--surface)] border border-[var(--pline)] text-xs text-[var(--ptxt)] focus:border-[#00B050] focus:outline-none"
+            >
+              <option value="center">توسيط</option>
+              <option value="right">يمين</option>
+              <option value="left">يسار</option>
+            </select>
+          </label>
         </div>
 
         <div className="grid grid-cols-2 gap-3">
           <label className="flex flex-col gap-1">
             <div className="flex justify-between text-xs text-[var(--ptxt)]">
-              <span>موضع السؤال (عمودياً)</span>
-              <span className="font-mono-nums">{template.questionY}%</span>
+              <span>موضع السؤال أفقياً (X)</span>
+              <span className="font-mono-nums">{Math.round(template.questionX ?? 50)}%</span>
             </div>
             <input
               type="range"
-              min={10}
-              max={55}
+              min={15}
+              max={85}
               step={1}
-              value={template.questionY}
-              onChange={(e) => patch({ questionY: parseInt(e.target.value, 10) })}
+              value={template.questionX ?? 50}
+              onChange={(e) => patch({ questionX: parseFloat(e.target.value) }, false)}
             />
           </label>
 
           <label className="flex flex-col gap-1">
             <div className="flex justify-between text-xs text-[var(--ptxt)]">
-              <span>حجم خط السؤال</span>
-              <span className="font-mono-nums">{template.questionFontSize}px</span>
+              <span>موضع السؤال عمودياً (Y)</span>
+              <span className="font-mono-nums">{Math.round(template.questionY)}%</span>
             </div>
             <input
               type="range"
-              min={36}
-              max={84}
-              step={2}
-              value={template.questionFontSize}
-              onChange={(e) => patch({ questionFontSize: parseInt(e.target.value, 10) })}
+              min={8}
+              max={85}
+              step={1}
+              value={template.questionY}
+              onChange={(e) => patch({ questionY: parseInt(e.target.value, 10) }, false)}
             />
           </label>
 
@@ -644,11 +1513,58 @@ export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
             </div>
             <input
               type="range"
-              min={45}
-              max={96}
+              min={30}
+              max={98}
               step={1}
               value={template.questionWidth}
-              onChange={(e) => patch({ questionWidth: parseFloat(e.target.value) })}
+              onChange={(e) => patch({ questionWidth: parseFloat(e.target.value) }, false)}
+            />
+          </label>
+
+          <label className="flex flex-col gap-1">
+            <div className="flex justify-between text-xs text-[var(--ptxt)]">
+              <span>ارتفاع مربع السؤال</span>
+              <span className="font-mono-nums">
+                {(template.questionHeightPct ?? 0) === 0 ? 'تلقائي' : `${template.questionHeightPct}%`}
+              </span>
+            </div>
+            <input
+              type="range"
+              min={0}
+              max={32}
+              step={1}
+              value={template.questionHeightPct ?? 0}
+              onChange={(e) => patch({ questionHeightPct: parseInt(e.target.value, 10) }, false)}
+            />
+          </label>
+
+          <label className="flex flex-col gap-1">
+            <div className="flex justify-between text-xs text-[var(--ptxt)]">
+              <span>حجم خط السؤال</span>
+              <span className="font-mono-nums">{template.questionFontSize}px</span>
+            </div>
+            <input
+              type="range"
+              min={28}
+              max={96}
+              step={2}
+              value={template.questionFontSize}
+              onChange={(e) => patch({ questionFontSize: parseInt(e.target.value, 10) }, false)}
+            />
+          </label>
+
+          <label className="flex flex-col gap-1">
+            <div className="flex justify-between text-xs text-[var(--ptxt)]">
+              <span>سماكة حدود السؤال</span>
+              <span className="font-mono-nums">{template.questionBorderWidth}px</span>
+            </div>
+            <input
+              type="range"
+              min={0}
+              max={14}
+              step={1}
+              value={template.questionBorderWidth}
+              onChange={(e) => patch({ questionBorderWidth: parseInt(e.target.value, 10) }, false)}
             />
           </label>
 
@@ -663,7 +1579,7 @@ export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
               max={70}
               step={2}
               value={template.questionBorderRadius}
-              onChange={(e) => patch({ questionBorderRadius: parseInt(e.target.value, 10) })}
+              onChange={(e) => patch({ questionBorderRadius: parseInt(e.target.value, 10) }, false)}
             />
           </label>
 
@@ -678,33 +1594,33 @@ export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
               max={1}
               step={0.05}
               value={template.questionBoxOpacity}
-              onChange={(e) => patch({ questionBoxOpacity: parseFloat(e.target.value) })}
+              onChange={(e) => patch({ questionBoxOpacity: parseFloat(e.target.value) }, false)}
             />
           </label>
 
-          <div className="flex items-center justify-between gap-2 px-3 py-1.5 rounded-lg bg-[var(--surface)] border border-[var(--pline)]">
-            <span className="text-xs text-[var(--ptxt)]">النص / الصندوق / الحد</span>
-            <div className="flex items-center gap-1">
+          <div className="col-span-2 flex items-center justify-between gap-2 px-3 py-1.5 rounded-lg bg-[var(--surface)] border border-[var(--pline)]">
+            <span className="text-xs text-[var(--ptxt)]">ألوان السؤال (النص / الصندوق / الحد)</span>
+            <div className="flex items-center gap-1.5">
               <input
                 type="color"
                 value={template.questionTextColor}
-                onChange={(e) => patch({ questionTextColor: e.target.value })}
+                onChange={(e) => patch({ questionTextColor: e.target.value }, false)}
                 title="لون نص السؤال"
-                className="w-5 h-5 rounded bg-transparent border-0 cursor-pointer"
+                className="w-6 h-6 rounded bg-transparent border-0 cursor-pointer"
               />
               <input
                 type="color"
                 value={template.questionBoxColor}
-                onChange={(e) => patch({ questionBoxColor: e.target.value })}
+                onChange={(e) => patch({ questionBoxColor: e.target.value }, false)}
                 title="لون صندوق السؤال"
-                className="w-5 h-5 rounded bg-transparent border-0 cursor-pointer"
+                className="w-6 h-6 rounded bg-transparent border-0 cursor-pointer"
               />
               <input
                 type="color"
                 value={template.questionBorderColor}
-                onChange={(e) => patch({ questionBorderColor: e.target.value })}
+                onChange={(e) => patch({ questionBorderColor: e.target.value }, false)}
                 title="لون حد السؤال"
-                className="w-5 h-5 rounded bg-transparent border-0 cursor-pointer"
+                className="w-6 h-6 rounded bg-transparent border-0 cursor-pointer"
               />
             </div>
           </div>
@@ -720,6 +1636,18 @@ export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
             />
             <span className="text-xs font-bold text-[#00B050] dark:text-[#6ee7b7]">
               تحسين ظهور السؤال والخيارات (تباين + إطار مضيء + تدرج احترافي)
+            </span>
+          </label>
+
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={Boolean(template.autoFitText)}
+              onChange={(e) => patch({ autoFitText: e.target.checked })}
+              className="w-4 h-4 accent-[#00B050] rounded cursor-pointer"
+            />
+            <span className="text-xs text-[var(--ptxt)]">
+              ضبط تلقائي لحجم النص الطويل لمنع خروجه عن الصندوق (Auto-Fit)
             </span>
           </label>
 
@@ -745,24 +1673,125 @@ export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
             </label>
           </div>
         </div>
+
+        {template.showBadge && (
+          <div className="p-3 rounded-xl bg-[var(--surface)] border border-[var(--pline)] flex flex-col gap-2.5">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-bold text-[var(--ptxt)]">إعدادات الشارة العلوية</span>
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] text-[var(--pmuted)]">خلفية / نص:</span>
+                <input
+                  type="color"
+                  value={template.badgeBgColor}
+                  onChange={(e) => patch({ badgeBgColor: e.target.value }, false)}
+                  title="لون خلفية الشارة"
+                  className="w-5 h-5 rounded bg-transparent border-0 cursor-pointer"
+                />
+                <input
+                  type="color"
+                  value={template.badgeTextColor}
+                  onChange={(e) => patch({ badgeTextColor: e.target.value }, false)}
+                  title="لون نص الشارة"
+                  className="w-5 h-5 rounded bg-transparent border-0 cursor-pointer"
+                />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <label className="flex flex-col gap-1">
+                <div className="flex justify-between text-[11px] text-[var(--ptxt)]">
+                  <span>موضع أفقياً (X)</span>
+                  <span className="font-mono-nums">{Math.round(template.badgeX ?? 50)}%</span>
+                </div>
+                <input
+                  type="range"
+                  min={10}
+                  max={90}
+                  step={1}
+                  value={template.badgeX ?? 50}
+                  onChange={(e) => patch({ badgeX: parseFloat(e.target.value) }, false)}
+                />
+              </label>
+              <label className="flex flex-col gap-1">
+                <div className="flex justify-between text-[11px] text-[var(--ptxt)]">
+                  <span>موضع عمودياً (Y)</span>
+                  <span className="font-mono-nums">{Math.round(template.badgeY)}%</span>
+                </div>
+                <input
+                  type="range"
+                  min={4}
+                  max={85}
+                  step={1}
+                  value={template.badgeY}
+                  onChange={(e) => patch({ badgeY: parseFloat(e.target.value) }, false)}
+                />
+              </label>
+              <label className="flex flex-col gap-1">
+                <div className="flex justify-between text-[11px] text-[var(--ptxt)]">
+                  <span>حجم الشارة</span>
+                  <span className="font-mono-nums">
+                    {Math.round((template.badgeScale ?? 1) * 100)}%
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={0.6}
+                  max={1.8}
+                  step={0.05}
+                  value={template.badgeScale ?? 1}
+                  onChange={(e) => patch({ badgeScale: parseFloat(e.target.value) }, false)}
+                />
+              </label>
+              <label className="flex flex-col gap-1">
+                <div className="flex justify-between text-[11px] text-[var(--ptxt)]">
+                  <span>استدارة الشارة</span>
+                  <span className="font-mono-nums">{template.badgeBorderRadius ?? 33}px</span>
+                </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={40}
+                  step={2}
+                  value={template.badgeBorderRadius ?? 33}
+                  onChange={(e) =>
+                    patch({ badgeBorderRadius: parseInt(e.target.value, 10) }, false)
+                  }
+                />
+              </label>
+            </div>
+          </div>
+        )}
+          </div>
+        )}
       </section>
 
-      {/* 2B. Box Shapes, Depth, Borders & Zoom/Scale */}
-      <section className="flex flex-col gap-3 border-t border-[var(--pline)] pt-5">
-        <div className="flex items-center justify-between gap-2">
-          <h2 className="text-sm font-bold text-[var(--ptxt)]">
-            2ب. شكل الصناديق، التجويف، الحواف، والتكبير
-          </h2>
-          {Math.abs((template.globalScale ?? 1) - 1) > 0.01 && (
-            <button
-              type="button"
-              onClick={() => patch({ globalScale: 1, timerScale: 1, badgeScale: 1 })}
-              className="text-[11px] font-bold text-[#00B050] hover:underline cursor-pointer"
-            >
-              إعادة الحجم 100%
-            </button>
-          )}
-        </div>
+      {/* Section 5: Box Shapes, Depth, Borders & Zoom/Scale */}
+      <section
+        ref={(el) => {
+          sectionRefs.current.shapes = el;
+        }}
+        className={`rounded-xl border overflow-hidden transition-colors ${
+          isSectionOpen('shapes') ? 'border-[#00B050]/55 bg-[var(--panel)]' : 'border-[var(--pline)]'
+        }`}
+      >
+        {renderAccordionHeader(
+          'shapes',
+          '5. شكل الصناديق والحواف والزوم',
+          `${template.boxStyle || 'flat'} · ${Math.round((template.globalScale ?? 1) * 100)}%`,
+          Box
+        )}
+        {isSectionOpen('shapes') && (
+          <div className="p-3.5 border-t border-[var(--pline)] flex flex-col gap-3">
+            {Math.abs((template.globalScale ?? 1) - 1) > 0.01 && (
+              <div className="flex items-center justify-end">
+                <button
+                  type="button"
+                  onClick={() => patch({ globalScale: 1, timerScale: 1, badgeScale: 1 })}
+                  className="text-[11px] font-bold text-[#00B050] hover:underline cursor-pointer"
+                >
+                  إعادة الحجم 100%
+                </button>
+              </div>
+            )}
 
         <div className="grid grid-cols-2 gap-2.5">
           <label className="flex flex-col gap-1">
@@ -778,6 +1807,12 @@ export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
               <option value="glass">زجاجي شفاف (Glass)</option>
               <option value="neon">نيون متوهج (Neon)</option>
               <option value="millionaireHex">سداسي من سيربح المليون 💎</option>
+              <option value="pill3d">كبسولة بارزة ناعمة (Pill 3D)</option>
+              <option value="chamfer">زوايا مقصوصة عسكرية (Chamfer)</option>
+              <option value="broadcastBar">شريط بث تلفزيوني (TV Bar)</option>
+              <option value="ticket">بطاقة تذكرة مقصوصة (Ticket)</option>
+              <option value="layeredCard">بطاقة بطبقات متداخلة (Layered)</option>
+              <option value="minimalOutline">إطار نظيف شفاف (Minimal)</option>
             </select>
           </label>
 
@@ -792,6 +1827,10 @@ export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
               <option value="double">إطار مزدوج (Double)</option>
               <option value="gradientGold">إطار ذهبي متدرج ✨</option>
               <option value="gradientNeon">إطار نيون متدرج ⚡</option>
+              <option value="metallicSilver">إطار فضي معدني (Silver)</option>
+              <option value="gradientSunset">إطار شفق متدرج (Sunset)</option>
+              <option value="dashedGold">إطار متقطع فاخر (Dashed Gold)</option>
+              <option value="cornerBrackets">زوايا إشارة مضيئة (Brackets)</option>
             </select>
           </label>
         </div>
@@ -808,7 +1847,7 @@ export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
               max={1.25}
               step={0.02}
               value={template.globalScale ?? 1}
-              onChange={(e) => patch({ globalScale: parseFloat(e.target.value) })}
+              onChange={(e) => patch({ globalScale: parseFloat(e.target.value) }, false)}
             />
           </label>
 
@@ -819,11 +1858,11 @@ export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
             </div>
             <input
               type="range"
-              min={0.7}
-              max={1.4}
+              min={0.5}
+              max={1.8}
               step={0.05}
               value={template.timerScale ?? 1}
-              onChange={(e) => patch({ timerScale: parseFloat(e.target.value) })}
+              onChange={(e) => patch({ timerScale: parseFloat(e.target.value) }, false)}
             />
           </label>
 
@@ -840,7 +1879,7 @@ export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
               max={1.5}
               step={0.1}
               value={template.shadowIntensity ?? 1}
-              onChange={(e) => patch({ shadowIntensity: parseFloat(e.target.value) })}
+              onChange={(e) => patch({ shadowIntensity: parseFloat(e.target.value) }, false)}
             />
           </label>
 
@@ -857,46 +1896,9 @@ export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
               max={1}
               step={0.05}
               value={template.glowIntensity ?? 0}
-              onChange={(e) => patch({ glowIntensity: parseFloat(e.target.value) })}
+              onChange={(e) => patch({ glowIntensity: parseFloat(e.target.value) }, false)}
             />
           </label>
-
-          <label className="flex flex-col gap-1">
-            <div className="flex justify-between text-xs text-[var(--ptxt)]">
-              <span>سماكة حواف الصناديق</span>
-              <span className="font-mono-nums">{template.questionBorderWidth}px</span>
-            </div>
-            <input
-              type="range"
-              min={0}
-              max={10}
-              step={1}
-              value={template.questionBorderWidth}
-              onChange={(e) => {
-                const w = parseInt(e.target.value, 10);
-                patch({ questionBorderWidth: w, optionBorderWidth: w });
-              }}
-            />
-          </label>
-
-          {template.showBadge && (
-            <label className="flex flex-col gap-1">
-              <div className="flex justify-between text-xs text-[var(--ptxt)]">
-                <span>حجم الشارة العلوية</span>
-                <span className="font-mono-nums">
-                  {Math.round((template.badgeScale ?? 1) * 100)}%
-                </span>
-              </div>
-              <input
-                type="range"
-                min={0.7}
-                max={1.4}
-                step={0.05}
-                value={template.badgeScale ?? 1}
-                onChange={(e) => patch({ badgeScale: parseFloat(e.target.value) })}
-              />
-            </label>
-          )}
         </div>
 
         <label className="flex flex-col gap-1">
@@ -993,11 +1995,48 @@ export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
             </div>
           )}
         </div>
+          </div>
+        )}
       </section>
 
-      {/* 3. Four Options Layout & Styling */}
-      <section className="flex flex-col gap-3 border-t border-[var(--pline)] pt-5">
-        <h2 className="text-sm font-bold text-[var(--ptxt)]">3. تخطيط الخيارات وحرية العرض</h2>
+      {/* Section 6: Four Options Layout & Styling */}
+      <section
+        ref={(el) => {
+          sectionRefs.current.options = el;
+        }}
+        className={`rounded-xl border overflow-hidden transition-colors ${
+          isSectionOpen('options') ? 'border-[#00B050]/55 bg-[var(--panel)]' : 'border-[var(--pline)]'
+        }`}
+      >
+        {renderAccordionHeader(
+          'options',
+          '6. تخطيط الخيارات وألوانها',
+          template.optionsLayout === 'vertical' ? 'عمودي' : 'شبكة 2×2',
+          LayoutGrid
+        )}
+        {isSectionOpen('options') && (
+          <div className="p-3.5 border-t border-[var(--pline)] flex flex-col gap-3">
+            <div className="flex items-center justify-end">
+              <button
+                type="button"
+                onClick={() =>
+                  patch({
+                    optionsX: DEFAULT_TEMPLATE.optionsX,
+                    optionsStartY: DEFAULT_TEMPLATE.optionsStartY,
+                    optionsWidth: DEFAULT_TEMPLATE.optionsWidth,
+                    optionsGap: DEFAULT_TEMPLATE.optionsGap,
+                    optionsColGap: 0,
+                    optionHeight: DEFAULT_TEMPLATE.optionHeight,
+                    optionFontSize: DEFAULT_TEMPLATE.optionFontSize,
+                    optionBorderWidth: DEFAULT_TEMPLATE.optionBorderWidth,
+                    optionBorderRadius: DEFAULT_TEMPLATE.optionBorderRadius,
+                  })
+                }
+                className="text-[11px] font-bold text-[var(--pmuted)] hover:text-[#00B050] cursor-pointer"
+              >
+                تصفير أبعاد الخيارات
+              </button>
+            </div>
 
         <div className="grid grid-cols-2 gap-2">
           <div className="flex flex-col gap-1">
@@ -1056,6 +2095,7 @@ export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
               <option value="auto">تلقائي حسب القالب</option>
               <option value="center">توسيط داخل الصندوق</option>
               <option value="right">محاذاة لليمين</option>
+              <option value="left">محاذاة لليسار</option>
             </select>
           </label>
         </div>
@@ -1090,16 +2130,31 @@ export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
 
           <label className="flex flex-col gap-1">
             <div className="flex justify-between text-xs text-[var(--ptxt)]">
-              <span>بداية الخيارات</span>
+              <span>إزاحة الخيارات أفقياً (X)</span>
+              <span className="font-mono-nums">{Math.round(template.optionsX ?? 50)}%</span>
+            </div>
+            <input
+              type="range"
+              min={15}
+              max={85}
+              step={1}
+              value={template.optionsX ?? 50}
+              onChange={(e) => patch({ optionsX: parseFloat(e.target.value) }, false)}
+            />
+          </label>
+
+          <label className="flex flex-col gap-1">
+            <div className="flex justify-between text-xs text-[var(--ptxt)]">
+              <span>بداية الخيارات عمودياً (Y)</span>
               <span className="font-mono-nums">{template.optionsStartY}%</span>
             </div>
             <input
               type="range"
-              min={25}
-              max={75}
+              min={15}
+              max={88}
               step={0.5}
               value={template.optionsStartY}
-              onChange={(e) => patch({ optionsStartY: parseFloat(e.target.value) })}
+              onChange={(e) => patch({ optionsStartY: parseFloat(e.target.value) }, false)}
             />
           </label>
 
@@ -1110,26 +2165,88 @@ export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
             </div>
             <input
               type="range"
-              min={50}
+              min={35}
               max={100}
-              step={2}
+              step={1}
               value={template.optionsWidth}
-              onChange={(e) => patch({ optionsWidth: parseInt(e.target.value, 10) })}
+              onChange={(e) => patch({ optionsWidth: parseInt(e.target.value, 10) }, false)}
             />
           </label>
 
           <label className="flex flex-col gap-1">
             <div className="flex justify-between text-xs text-[var(--ptxt)]">
-              <span>المسافة بين الخيارات</span>
+              <span>ارتفاع كل خيار</span>
+              <span className="font-mono-nums">{template.optionHeight}px</span>
+            </div>
+            <input
+              type="range"
+              min={56}
+              max={210}
+              step={2}
+              value={template.optionHeight}
+              onChange={(e) => patch({ optionHeight: parseInt(e.target.value, 10) }, false)}
+            />
+          </label>
+
+          <label className="flex flex-col gap-1">
+            <div className="flex justify-between text-xs text-[var(--ptxt)]">
+              <span>المسافة العمودية بين الصفوف</span>
               <span className="font-mono-nums">{template.optionsGap}px</span>
             </div>
             <input
               type="range"
-              min={6}
-              max={64}
+              min={0}
+              max={90}
               step={2}
               value={template.optionsGap}
-              onChange={(e) => patch({ optionsGap: parseInt(e.target.value, 10) })}
+              onChange={(e) => patch({ optionsGap: parseInt(e.target.value, 10) }, false)}
+            />
+          </label>
+
+          <label className="flex flex-col gap-1">
+            <div className="flex justify-between text-xs text-[var(--ptxt)]">
+              <span>المسافة الأفقية بين الأعمدة</span>
+              <span className="font-mono-nums">
+                {(template.optionsColGap ?? 0) === 0 ? 'مطابق' : `${template.optionsColGap}px`}
+              </span>
+            </div>
+            <input
+              type="range"
+              min={0}
+              max={90}
+              step={2}
+              value={template.optionsColGap ?? 0}
+              onChange={(e) => patch({ optionsColGap: parseInt(e.target.value, 10) }, false)}
+            />
+          </label>
+
+          <label className="flex flex-col gap-1">
+            <div className="flex justify-between text-xs text-[var(--ptxt)]">
+              <span>حجم خط الخيار</span>
+              <span className="font-mono-nums">{template.optionFontSize}px</span>
+            </div>
+            <input
+              type="range"
+              min={22}
+              max={68}
+              step={2}
+              value={template.optionFontSize}
+              onChange={(e) => patch({ optionFontSize: parseInt(e.target.value, 10) }, false)}
+            />
+          </label>
+
+          <label className="flex flex-col gap-1">
+            <div className="flex justify-between text-xs text-[var(--ptxt)]">
+              <span>سماكة حدود الخيار</span>
+              <span className="font-mono-nums">{template.optionBorderWidth}px</span>
+            </div>
+            <input
+              type="range"
+              min={0}
+              max={14}
+              step={1}
+              value={template.optionBorderWidth}
+              onChange={(e) => patch({ optionBorderWidth: parseInt(e.target.value, 10) }, false)}
             />
           </label>
 
@@ -1144,37 +2261,7 @@ export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
               max={64}
               step={2}
               value={template.optionBorderRadius}
-              onChange={(e) => patch({ optionBorderRadius: parseInt(e.target.value, 10) })}
-            />
-          </label>
-
-          <label className="flex flex-col gap-1">
-            <div className="flex justify-between text-xs text-[var(--ptxt)]">
-              <span>حجم خط الخيار</span>
-              <span className="font-mono-nums">{template.optionFontSize}px</span>
-            </div>
-            <input
-              type="range"
-              min={26}
-              max={60}
-              step={2}
-              value={template.optionFontSize}
-              onChange={(e) => patch({ optionFontSize: parseInt(e.target.value, 10) })}
-            />
-          </label>
-
-          <label className="flex flex-col gap-1">
-            <div className="flex justify-between text-xs text-[var(--ptxt)]">
-              <span>ارتفاع الخيار</span>
-              <span className="font-mono-nums">{template.optionHeight}px</span>
-            </div>
-            <input
-              type="range"
-              min={80}
-              max={170}
-              step={4}
-              value={template.optionHeight}
-              onChange={(e) => patch({ optionHeight: parseInt(e.target.value, 10) })}
+              onChange={(e) => patch({ optionBorderRadius: parseInt(e.target.value, 10) }, false)}
             />
           </label>
 
@@ -1189,42 +2276,111 @@ export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
               max={1}
               step={0.05}
               value={template.optionBoxOpacity}
-              onChange={(e) => patch({ optionBoxOpacity: parseFloat(e.target.value) })}
+              onChange={(e) => patch({ optionBoxOpacity: parseFloat(e.target.value) }, false)}
             />
           </label>
 
-          <div className="flex items-center justify-between gap-2 px-3 py-1.5 rounded-lg bg-[var(--surface)] border border-[var(--pline)]">
-            <span className="text-xs text-[var(--ptxt)]">النص / الصندوق / الحد</span>
-            <div className="flex items-center gap-1">
+          <div className="col-span-2 flex items-center justify-between gap-2 px-3 py-1.5 rounded-lg bg-[var(--surface)] border border-[var(--pline)]">
+            <span className="text-xs text-[var(--ptxt)]">ألوان الخيارات (النص / الصندوق / الحد)</span>
+            <div className="flex items-center gap-1.5">
               <input
                 type="color"
                 value={template.optionTextColor}
-                onChange={(e) => patch({ optionTextColor: e.target.value })}
+                onChange={(e) => patch({ optionTextColor: e.target.value }, false)}
                 title="لون نص الخيار"
-                className="w-5 h-5 rounded bg-transparent border-0 cursor-pointer"
+                className="w-6 h-6 rounded bg-transparent border-0 cursor-pointer"
               />
               <input
                 type="color"
                 value={template.optionBoxColor}
-                onChange={(e) => patch({ optionBoxColor: e.target.value })}
+                onChange={(e) => patch({ optionBoxColor: e.target.value }, false)}
                 title="لون صندوق الخيار"
-                className="w-5 h-5 rounded bg-transparent border-0 cursor-pointer"
+                className="w-6 h-6 rounded bg-transparent border-0 cursor-pointer"
               />
               <input
                 type="color"
                 value={template.optionBorderColor}
-                onChange={(e) => patch({ optionBorderColor: e.target.value })}
+                onChange={(e) => patch({ optionBorderColor: e.target.value }, false)}
                 title="لون حدود الخيار"
-                className="w-5 h-5 rounded bg-transparent border-0 cursor-pointer"
+                className="w-6 h-6 rounded bg-transparent border-0 cursor-pointer"
               />
             </div>
           </div>
-        </div>
+
+          {template.optionLabelStyle !== 'none' && (
+            <div className="col-span-2 flex items-center justify-between gap-2 px-3 py-1.5 rounded-lg bg-[var(--surface)] border border-[var(--pline)]">
+              <span className="text-xs text-[var(--ptxt)]">ألوان شارة الترقيم (خلفية / نص)</span>
+              <div className="flex items-center gap-1.5">
+                <input
+                  type="color"
+                  value={template.optionLabelBgColor}
+                  onChange={(e) => patch({ optionLabelBgColor: e.target.value }, false)}
+                  title="خلفية حرف/رقم الخيار"
+                  className="w-6 h-6 rounded bg-transparent border-0 cursor-pointer"
+                />
+                <input
+                  type="color"
+                  value={template.optionLabelTextColor}
+                  onChange={(e) => patch({ optionLabelTextColor: e.target.value }, false)}
+                  title="لون حرف/رقم الخيار"
+                  className="w-6 h-6 rounded bg-transparent border-0 cursor-pointer"
+                />
+              </div>
+            </div>
+          )}
+          </div>
+          </div>
+        )}
       </section>
 
-      {/* 4. Timer, Answer Reveal & End Card */}
-      <section className="flex flex-col gap-3 border-t border-[var(--pline)] pt-5">
-        <h2 className="text-sm font-bold text-[var(--ptxt)]">4. المؤقت، كشف الجواب، والنهاية</h2>
+      {/* Section 7: Timer, Answer Reveal & Explanation */}
+      <section
+        ref={(el) => {
+          sectionRefs.current.timer = el;
+        }}
+        className={`rounded-xl border overflow-hidden transition-colors ${
+          isSectionOpen('timer') ? 'border-[#00B050]/55 bg-[var(--panel)]' : 'border-[var(--pline)]'
+        }`}
+      >
+        {renderAccordionHeader(
+          'timer',
+          '7. المؤقت وكشف الجواب والتوضيح',
+          `${template.timerStyle} · ${
+            template.timerPlacement === 'centerOfOptions'
+              ? 'منتصف'
+              : template.timerPlacement === 'free'
+                ? 'حر'
+                : template.timerPlacement === 'belowOptions'
+                  ? 'أسفل'
+                  : 'أعلى'
+          }`,
+          Timer
+        )}
+        {isSectionOpen('timer') && (
+          <div className="p-3.5 border-t border-[var(--pline)] flex flex-col gap-3">
+            <div className="flex items-center justify-end">
+              <button
+                type="button"
+                onClick={() =>
+                  patch({
+                    timerStyle: DEFAULT_TEMPLATE.timerStyle,
+                    timerPlacement: DEFAULT_TEMPLATE.timerPlacement,
+                    timerX: DEFAULT_TEMPLATE.timerX,
+                    timerY: DEFAULT_TEMPLATE.timerY,
+                    timerScale: 1,
+                    timerOpacity: 1,
+                    timerUnitSuffix: '',
+                    timerUrgentThreshold: 3,
+                    timerUrgentColor: '#EF4444',
+                    timerBorderColor: '',
+                    timerBorderWidth: -1,
+                  })
+                }
+                className="text-[11px] font-bold text-[var(--pmuted)] hover:text-[#00B050] cursor-pointer"
+              >
+                تصفير المؤقت
+              </button>
+            </div>
 
         <div className="grid grid-cols-2 gap-2.5">
           <label className="flex flex-col gap-1">
@@ -1234,8 +2390,11 @@ export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
               onChange={(e) => patch({ timerStyle: e.target.value as TimerStyle })}
               className="px-3 py-2 rounded-lg bg-[var(--surface)] border border-[var(--pline)] text-xs text-[var(--ptxt)] focus:border-[#00B050] focus:outline-none"
             >
-              <option value="channelBox">مربع القناة الأوسط (5ث فيديو/رقم)</option>
+              <option value="channelBox">مربع القناة الأنيق</option>
               <option value="circle">دائرة عد تنازلي</option>
+              <option value="neonRing">حلقة نيون مضيئة ⚡</option>
+              <option value="hexBadge">شارة سداسية ماسية 💎</option>
+              <option value="pillCountdown">كبسولة + شريط تقدم</option>
               <option value="bar">شريط تقدم + ثواني</option>
               <option value="digits">أرقام كبيرة</option>
               <option value="none">بدون مؤقت</option>
@@ -1255,62 +2414,261 @@ export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
               <option value="highlightGlow">تلوين وتوهج فقط</option>
             </select>
           </label>
+        </div>
 
-          <label className="flex flex-col gap-1">
-            <div className="flex justify-between text-xs text-[var(--ptxt)]">
-              <span>موقع المؤقت عمودياً</span>
-              <span className="font-mono-nums">{template.timerY}%</span>
-            </div>
+        {/* Flexible Timer Placement & Visibility Lifecycle */}
+        <div className="p-3 rounded-xl bg-[var(--surface)] border border-[var(--pline)] flex flex-col gap-2.5">
+          <span className="text-xs font-bold text-[var(--ptxt)]">تموضع المؤقت والمساحات الحرة</span>
+          <div className="grid grid-cols-2 gap-1.5">
+            {(
+              [
+                { id: 'aboveOptions', label: 'أعلى الخيارات (منسّق)' },
+                { id: 'centerOfOptions', label: 'في منتصف الخيارات 🎯' },
+                { id: 'belowOptions', label: 'أسفل الخيارات' },
+                { id: 'free', label: 'تحكم حر كامل (X / Y)' },
+              ] as { id: TimerPlacement; label: string }[]
+            ).map((opt) => {
+              const active = (template.timerPlacement || 'aboveOptions') === opt.id;
+              return (
+                <button
+                  key={opt.id}
+                  type="button"
+                  onClick={() => patch({ timerPlacement: opt.id })}
+                  className={`px-2.5 py-2 rounded-lg border text-[11px] font-bold transition-colors cursor-pointer ${
+                    active
+                      ? 'bg-[#00B050]/18 border-[#00B050] text-[#00B050] dark:text-[#6ee7b7]'
+                      : 'bg-[var(--panel)] border-[var(--pline)] text-[var(--ptxt)] hover:border-[var(--gold)]'
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="grid grid-cols-2 gap-2">
+            <label className="flex flex-col gap-1">
+              <span className="text-[11px] text-[var(--pmuted)]">توقيت ظهور المؤقت</span>
+              <select
+                value={template.timerVisibilityMode || 'afterOptionsBeforeAnswer'}
+                onChange={(e) =>
+                  patch({ timerVisibilityMode: e.target.value as TimerVisibilityMode })
+                }
+                className="px-2.5 py-1.5 rounded-lg bg-[var(--panel)] border border-[var(--pline)] text-xs text-[var(--ptxt)] focus:border-[#00B050] focus:outline-none"
+              >
+                <option value="afterOptionsBeforeAnswer">بعد الخيارات ويختفي قبل الجواب ✓</option>
+                <option value="fromQuestion">من السؤال ويختفي قبل الجواب</option>
+                <option value="untilReveal">بعد الخيارات حتى لحظة الجواب</option>
+              </select>
+            </label>
+
+            <label className="flex flex-col gap-1">
+              <span className="text-[11px] text-[var(--pmuted)]">وحدة الرقم</span>
+              <select
+                value={template.timerUnitSuffix ?? ''}
+                onChange={(e) =>
+                  patch({ timerUnitSuffix: e.target.value as TimerUnitSuffix })
+                }
+                className="px-2.5 py-1.5 rounded-lg bg-[var(--panel)] border border-[var(--pline)] text-xs text-[var(--ptxt)] focus:border-[#00B050] focus:outline-none"
+              >
+                <option value="">رقم فقط (5)</option>
+                <option value="ث">ثواني عربي (5ث)</option>
+                <option value="s">إنجليزي (5s)</option>
+              </select>
+            </label>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3 pt-1">
+            <label className="flex flex-col gap-1">
+              <div className="flex justify-between text-[11px] text-[var(--ptxt)]">
+                <span>مساحة السؤال عن الخيارات</span>
+                <span className="font-mono-nums">{template.questionToOptionsGap ?? 0}px</span>
+              </div>
+              <input
+                type="range"
+                min={0}
+                max={200}
+                step={4}
+                value={template.questionToOptionsGap ?? 0}
+                onChange={(e) =>
+                  patch({ questionToOptionsGap: parseInt(e.target.value, 10) }, false)
+                }
+              />
+            </label>
+
+            {(template.timerPlacement || 'aboveOptions') === 'centerOfOptions' && (
+              <label className="flex flex-col gap-1">
+                <div className="flex justify-between text-[11px] text-[var(--ptxt)]">
+                  <span>توسعة منتصف الخيارات للمؤقت</span>
+                  <span className="font-mono-nums">{template.optionsCenterGap ?? 24}px</span>
+                </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={180}
+                  step={4}
+                  value={template.optionsCenterGap ?? 24}
+                  onChange={(e) =>
+                    patch({ optionsCenterGap: parseInt(e.target.value, 10) }, false)
+                  }
+                />
+              </label>
+            )}
+
+            {((template.timerPlacement || 'aboveOptions') === 'aboveOptions' ||
+              template.timerPlacement === 'free') && (
+              <>
+                <label className="flex flex-col gap-1">
+                  <div className="flex justify-between text-[11px] text-[var(--ptxt)]">
+                    <span>موضع المؤقت أفقياً (X)</span>
+                    <span className="font-mono-nums">{Math.round(template.timerX ?? 50)}%</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={5}
+                    max={95}
+                    step={1}
+                    value={template.timerX ?? 50}
+                    onChange={(e) => patch({ timerX: parseFloat(e.target.value) }, false)}
+                  />
+                </label>
+                <label className="flex flex-col gap-1">
+                  <div className="flex justify-between text-[11px] text-[var(--ptxt)]">
+                    <span>موضع المؤقت عمودياً (Y)</span>
+                    <span className="font-mono-nums">{template.timerY}%</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={5}
+                    max={95}
+                    step={0.5}
+                    value={template.timerY}
+                    onChange={(e) => patch({ timerY: parseFloat(e.target.value) }, false)}
+                  />
+                </label>
+              </>
+            )}
+
+            <label className="flex flex-col gap-1">
+              <div className="flex justify-between text-[11px] text-[var(--ptxt)]">
+                <span>شفافية المؤقت</span>
+                <span className="font-mono-nums">
+                  {Math.round((template.timerOpacity ?? 1) * 100)}%
+                </span>
+              </div>
+              <input
+                type="range"
+                min={0.2}
+                max={1}
+                step={0.05}
+                value={template.timerOpacity ?? 1}
+                onChange={(e) => patch({ timerOpacity: parseFloat(e.target.value) }, false)}
+              />
+            </label>
+
+            <label className="flex flex-col gap-1">
+              <div className="flex justify-between text-[11px] text-[var(--ptxt)]">
+                <span>سماكة حدود المؤقت</span>
+                <span className="font-mono-nums">
+                  {(template.timerBorderWidth ?? -1) < 0 ? 'تلقائي' : `${template.timerBorderWidth}px`}
+                </span>
+              </div>
+              <input
+                type="range"
+                min={-1}
+                max={10}
+                step={1}
+                value={template.timerBorderWidth ?? -1}
+                onChange={(e) =>
+                  patch({ timerBorderWidth: parseInt(e.target.value, 10) }, false)
+                }
+              />
+            </label>
+
+            <label className="flex flex-col gap-1">
+              <div className="flex justify-between text-[11px] text-[var(--ptxt)]">
+                <span>بدء تنبيه الاستعجال</span>
+                <span className="font-mono-nums">آخر {template.timerUrgentThreshold ?? 3} ث</span>
+              </div>
+              <input
+                type="range"
+                min={1}
+                max={8}
+                step={1}
+                value={template.timerUrgentThreshold ?? 3}
+                onChange={(e) =>
+                  patch({ timerUrgentThreshold: parseInt(e.target.value, 10) }, false)
+                }
+              />
+            </label>
+          </div>
+        </div>
+
+        <div className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg bg-[var(--surface)] border border-[var(--pline)]">
+          <span className="text-xs text-[var(--ptxt)]">ألوان: الصح / الخطأ / العداد / التنبيه / الإطار</span>
+          <div className="flex items-center gap-1.5">
             <input
-              type="range"
-              min={15}
-              max={92}
-              step={0.5}
-              value={template.timerY}
-              onChange={(e) => patch({ timerY: parseFloat(e.target.value) })}
+              type="color"
+              value={template.correctColor}
+              onChange={(e) => patch({ correctColor: e.target.value }, false)}
+              title="لون الإجابة الصحيحة"
+              className="w-5 h-5 rounded bg-transparent border-0 cursor-pointer"
             />
-          </label>
-
-          <div className="flex items-center justify-between gap-2 px-3 py-1.5 rounded-lg bg-[var(--surface)] border border-[var(--pline)]">
-            <span className="text-xs text-[var(--ptxt)]">الصحيح / الخطأ / العداد</span>
-            <div className="flex items-center gap-1.5">
+            {template.revealStyle === 'redWrongGreenCorrect' && (
               <input
                 type="color"
-                value={template.correctColor}
-                onChange={(e) => patch({ correctColor: e.target.value })}
-                title="لون الإجابة الصحيحة"
-                className="w-6 h-6 rounded bg-transparent border-0 cursor-pointer"
+                value={template.wrongColor || '#DC2626'}
+                onChange={(e) => patch({ wrongColor: e.target.value }, false)}
+                title="لون الخيارات الخاطئة (أحمر)"
+                className="w-5 h-5 rounded bg-transparent border-0 cursor-pointer"
               />
-              {template.revealStyle === 'redWrongGreenCorrect' && (
-                <input
-                  type="color"
-                  value={template.wrongColor || '#DC2626'}
-                  onChange={(e) => patch({ wrongColor: e.target.value })}
-                  title="لون الخيارات الخاطئة (أحمر)"
-                  className="w-6 h-6 rounded bg-transparent border-0 cursor-pointer"
-                />
-              )}
-              {!template.timerMatchBackground && (
-                <input
-                  type="color"
-                  value={template.timerBgColor || '#F2E3BA'}
-                  onChange={(e) => patch({ timerBgColor: e.target.value })}
-                  title="لون خلفية العداد"
-                  className="w-6 h-6 rounded bg-transparent border-0 cursor-pointer"
-                />
-              )}
+            )}
+            {!template.timerMatchBackground && (
               <input
                 type="color"
-                value={template.timerColor}
-                onChange={(e) => patch({ timerColor: e.target.value })}
-                title="لون أرقام العداد"
-                className="w-6 h-6 rounded bg-transparent border-0 cursor-pointer"
+                value={template.timerBgColor || '#F2E3BA'}
+                onChange={(e) => patch({ timerBgColor: e.target.value }, false)}
+                title="لون خلفية العداد"
+                className="w-5 h-5 rounded bg-transparent border-0 cursor-pointer"
               />
-            </div>
+            )}
+            <input
+              type="color"
+              value={template.timerColor}
+              onChange={(e) => patch({ timerColor: e.target.value }, false)}
+              title="لون أرقام العداد"
+              className="w-5 h-5 rounded bg-transparent border-0 cursor-pointer"
+            />
+            <input
+              type="color"
+              value={template.timerUrgentColor || '#EF4444'}
+              onChange={(e) => patch({ timerUrgentColor: e.target.value }, false)}
+              title="لون عداد الاستعجال في الثواني الأخيرة"
+              className="w-5 h-5 rounded bg-transparent border-0 cursor-pointer"
+            />
+            <input
+              type="color"
+              value={template.timerBorderColor || template.questionBorderColor}
+              onChange={(e) => patch({ timerBorderColor: e.target.value }, false)}
+              title="لون إطار العداد"
+              className="w-5 h-5 rounded bg-transparent border-0 cursor-pointer"
+            />
           </div>
         </div>
 
         <label className="flex items-center gap-2 cursor-pointer pt-1">
+          <input
+            type="checkbox"
+            checked={template.timerUrgentPulse !== false}
+            onChange={(e) => patch({ timerUrgentPulse: e.target.checked })}
+            className="w-4 h-4 accent-[#00B050] rounded cursor-pointer"
+          />
+          <span className="text-xs text-[var(--ptxt)]">
+            نبض وتنبيه لوني حماسي في الثواني الأخيرة 🔥
+          </span>
+        </label>
+
+        <label className="flex items-center gap-2 cursor-pointer">
           <input
             type="checkbox"
             checked={template.timerMatchBackground !== false}
@@ -1318,7 +2676,7 @@ export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
             className="w-4 h-4 accent-[#00B050] rounded cursor-pointer"
           />
           <span className="text-xs text-[var(--ptxt)]">
-            جعل العداد بنفس لون الخلفية تلقائياً
+            جعل العداد بنفس لون الخلفية تلقائياً (فك التحديد لحرية الألوان)
           </span>
         </label>
 
@@ -1358,6 +2716,89 @@ export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
           </span>
         </label>
 
+        {/* Explanation Box Setting (Previously missing UI!) */}
+        <div className="flex flex-col gap-2 p-3 rounded-xl bg-[var(--surface)] border border-[var(--pline)]">
+          <label className="flex items-center justify-between gap-2 cursor-pointer">
+            <span className="text-xs font-bold text-[var(--ptxt)]">
+              إظهار صندوق توضيح المعلومة أسفل الخيارات عند كشف الجواب
+            </span>
+            <input
+              type="checkbox"
+              checked={Boolean(template.showExplanationOnReveal)}
+              onChange={(e) => patch({ showExplanationOnReveal: e.target.checked })}
+              className="w-4 h-4 accent-[#00B050] rounded cursor-pointer shrink-0"
+            />
+          </label>
+          {template.showExplanationOnReveal && (
+            <div className="flex flex-col gap-2 pt-1.5 border-t border-[var(--pline)]">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[11px] text-[var(--pmuted)]">ألوان التوضيح (خلفية / نص)</span>
+                <div className="flex items-center gap-1.5">
+                  <input
+                    type="color"
+                    value={template.explanationBgColor || template.correctColor}
+                    onChange={(e) => patch({ explanationBgColor: e.target.value }, false)}
+                    title="لون صندوق التوضيح"
+                    className="w-5 h-5 rounded bg-transparent border-0 cursor-pointer"
+                  />
+                  <input
+                    type="color"
+                    value={template.explanationTextColor || '#FFFFFF'}
+                    onChange={(e) => patch({ explanationTextColor: e.target.value }, false)}
+                    title="لون نص التوضيح"
+                    className="w-5 h-5 rounded bg-transparent border-0 cursor-pointer"
+                  />
+                  {template.explanationBgColor && (
+                    <button
+                      type="button"
+                      onClick={() => patch({ explanationBgColor: '' })}
+                      className="text-[10px] text-[var(--pmuted)] hover:text-[#00B050] cursor-pointer"
+                    >
+                      تلقائي
+                    </button>
+                  )}
+                </div>
+              </div>
+              <label className="flex flex-col gap-1">
+                <div className="flex justify-between text-[11px] text-[var(--ptxt)]">
+                  <span>إزاحة صندوق التوضيح عمودياً</span>
+                  <span className="font-mono-nums">{template.explanationOffsetY ?? 0}px</span>
+                </div>
+                <input
+                  type="range"
+                  min={-80}
+                  max={140}
+                  step={4}
+                  value={template.explanationOffsetY ?? 0}
+                  onChange={(e) =>
+                    patch({ explanationOffsetY: parseInt(e.target.value, 10) }, false)
+                  }
+                />
+              </label>
+            </div>
+          )}
+        </div>
+          </div>
+        )}
+      </section>
+
+      {/* Section 8: Intro Hook & End Card */}
+      <section
+        ref={(el) => {
+          sectionRefs.current.introEnd = el;
+        }}
+        className={`rounded-xl border overflow-hidden transition-colors ${
+          isSectionOpen('introEnd') ? 'border-[#00B050]/55 bg-[var(--panel)]' : 'border-[var(--pline)]'
+        }`}
+      >
+        {renderAccordionHeader(
+          'introEnd',
+          '8. المقدمة (الهوك) وشاشة النهاية',
+          `${template.showIntroHook ? 'مقدمة' : 'بدون مقدمة'} · ${template.showEndCard ? 'نهاية' : 'بدون'}`,
+          LayoutTemplate
+        )}
+        {isSectionOpen('introEnd') && (
+          <div className="p-3.5 border-t border-[var(--pline)] flex flex-col gap-3">
         {/* Intro Hook Card Setting */}
         <div className="flex flex-col gap-2.5 p-3 rounded-xl bg-[var(--surface)] border border-[var(--pline)]">
           <label className="flex items-center justify-between gap-2 cursor-pointer">
@@ -1534,16 +2975,56 @@ export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
                   إظهار زر دعوة الاشتراك والتعليق أسفل شاشة النهاية
                 </span>
               </label>
+              {template.showEndSubscribeCta && (
+                <div className="flex flex-col gap-1.5 pt-1 border-t border-[var(--pline)]/70">
+                  <input
+                    type="text"
+                    value={template.endCtaText ?? ''}
+                    onChange={(e) => patch({ endCtaText: e.target.value })}
+                    placeholder="اشترك في القناة · اكتب نتيجتك في التعليقات"
+                    className="w-full px-3 py-1.5 rounded-lg bg-[var(--panel)] border border-[var(--pline)] text-xs text-[var(--ptxt)] placeholder:text-[var(--pmuted)] focus:border-[#00B050] focus:outline-none"
+                  />
+                  <div className="flex flex-wrap gap-1">
+                    {[
+                      'كم سؤالاً جاوبت صح؟ اكتب نتيجتك بالتعليقات 🔥',
+                      'اشترك وتحدى أصدقاءك في التعليقات!',
+                    ].map((presetText) => (
+                      <button
+                        key={presetText}
+                        type="button"
+                        onClick={() => patch({ endCtaText: presetText })}
+                        className="px-2 py-0.5 rounded bg-[var(--panel)] border border-[var(--pline)] hover:border-[#00B050] text-[10px] text-[var(--pmuted)] hover:text-[var(--ptxt)] cursor-pointer"
+                      >
+                        {presetText}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
             </>
           )}
-        </div>
+          </div>
+          </div>
+        )}
       </section>
 
-      {/* 5. Channel Brand Logo (Animated Watermark) & Slide Progress */}
-      <section className="flex flex-col gap-3 border-t border-[var(--pline)] pt-5">
-        <h2 className="text-sm font-bold text-[var(--ptxt)]">
-          5. شعار القناة المتحرك والعلامة المائية
-        </h2>
+      {/* Section 9: Channel Brand Logo & Slide Progress */}
+      <section
+        ref={(el) => {
+          sectionRefs.current.brand = el;
+        }}
+        className={`rounded-xl border overflow-hidden transition-colors ${
+          isSectionOpen('brand') ? 'border-[#00B050]/55 bg-[var(--panel)]' : 'border-[var(--pline)]'
+        }`}
+      >
+        {renderAccordionHeader(
+          'brand',
+          '9. شعار القناة والعداد العلوي',
+          template.brandLogoDataUrl ? 'شعار مرفوع' : template.brandHandleText || 'بدون شعار',
+          Crown
+        )}
+        {isSectionOpen('brand') && (
+          <div className="p-3.5 border-t border-[var(--pline)] flex flex-col gap-3">
 
         <div className="flex items-center gap-2">
           <input
@@ -1634,8 +3115,43 @@ export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
               <option value="topLeft">أعلى اليسار</option>
               <option value="bottomRight">أسفل اليمين</option>
               <option value="bottomLeft">أسفل اليسار</option>
+              <option value="custom">موضع حر (X / Y)</option>
             </select>
           </label>
+
+          {template.brandLogoPosition === 'custom' && (
+            <>
+              <label className="flex flex-col gap-1">
+                <div className="flex justify-between text-xs text-[var(--ptxt)]">
+                  <span>الشعار أفقياً (X)</span>
+                  <span className="font-mono-nums">{Math.round(template.brandLogoX ?? 88)}%</span>
+                </div>
+                <input
+                  type="range"
+                  min={5}
+                  max={95}
+                  step={1}
+                  value={template.brandLogoX ?? 88}
+                  onChange={(e) => patch({ brandLogoX: parseFloat(e.target.value) }, false)}
+                />
+              </label>
+
+              <label className="flex flex-col gap-1">
+                <div className="flex justify-between text-xs text-[var(--ptxt)]">
+                  <span>الشعار عمودياً (Y)</span>
+                  <span className="font-mono-nums">{Math.round(template.brandLogoY ?? 10)}%</span>
+                </div>
+                <input
+                  type="range"
+                  min={5}
+                  max={95}
+                  step={1}
+                  value={template.brandLogoY ?? 10}
+                  onChange={(e) => patch({ brandLogoY: parseFloat(e.target.value) }, false)}
+                />
+              </label>
+            </>
+          )}
 
           <label className="flex flex-col gap-1">
             <div className="flex justify-between text-xs text-[var(--ptxt)]">
@@ -1648,7 +3164,7 @@ export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
               max={220}
               step={4}
               value={template.brandLogoSize ?? 108}
-              onChange={(e) => patch({ brandLogoSize: parseInt(e.target.value, 10) })}
+              onChange={(e) => patch({ brandLogoSize: parseInt(e.target.value, 10) }, false)}
             />
           </label>
 
@@ -1665,7 +3181,7 @@ export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
               max={1}
               step={0.05}
               value={template.brandOpacity ?? 0.92}
-              onChange={(e) => patch({ brandOpacity: parseFloat(e.target.value) })}
+              onChange={(e) => patch({ brandOpacity: parseFloat(e.target.value) }, false)}
             />
           </label>
         </div>
@@ -1693,6 +3209,8 @@ export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
             إظهار عداد رقم السؤال وشريط التقدم أعلى الشاشة (سؤال 2 من 5)
           </span>
         </label>
+          </div>
+        )}
       </section>
     </div>
   );

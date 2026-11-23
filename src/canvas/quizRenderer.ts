@@ -8,6 +8,8 @@ import {
   SlideSchedule,
   SlideTransitionStyle,
   TemplateSettings,
+  TimerPlacement,
+  TimerVisibilityMode,
   TimingSettings,
   computeProjectTimeline,
   getCanvasDimensions,
@@ -15,7 +17,7 @@ import {
   getSlidePrizeTiers,
   getSlidesContentDuration,
 } from '../types/quiz';
-import { drawSmartQuizText, hasMathSyntax } from './mathCanvasRenderer';
+import { drawSmartQuizText, hasMathSyntax, measureSmartQuizTextHeight } from './mathCanvasRenderer';
 
 export const CANVAS_WIDTH = 1080;
 export const CANVAS_HEIGHT = 1920;
@@ -26,6 +28,23 @@ export interface TimelineSoundEvent {
   optionIndex?: number;
   tickSecond?: number;
   urgent?: boolean;
+  maxDuration?: number;
+}
+
+export type DragTargetId = 'badge' | 'question' | 'options' | 'timer' | 'brand';
+
+export interface StageElementHitbox {
+  id: DragTargetId;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  label: string;
+}
+
+export interface InteractiveStageState {
+  dragMode?: boolean;
+  activeTarget?: DragTargetId | null;
 }
 
 export interface SlideTimeInfo {
@@ -75,38 +94,90 @@ export function collectSoundEventsInInterval(
   const events: TimelineSoundEvent[] = [];
   if (currTime <= prevTime || slides.length === 0) return events;
 
-  if (template?.showIntroHook && prevTime < 0 && currTime >= 0) {
-    events.push({ type: 'introHook', slideIndex: 0 });
+  const schedules = computeProjectTimeline(slides, timing, audio, template);
+  const introDur = getIntroHookDuration(template, timing);
+
+  if (introDur > 0 && prevTime < 0 && currTime >= 0) {
+    const firstSlideStart = schedules[0]?.startTime ?? introDur;
+    events.push({
+      type: 'introHook',
+      slideIndex: 0,
+      maxDuration: Math.max(0.15, firstSlideStart - 0.02),
+    });
   }
 
-  const schedules = computeProjectTimeline(slides, timing, audio, template);
-
-  for (const sched of schedules) {
+  for (let idx = 0; idx < schedules.length; idx++) {
+    const sched = schedules[idx];
     const sIdx = sched.slideIndex;
+    const slide = slides[sIdx];
     const base = sched.startTime;
+    const nextSlideStart =
+      idx < schedules.length - 1 ? schedules[idx + 1].startTime : base + sched.duration;
     const tQ = base + sched.tQuestionStart;
     const tOpts = sched.tOptionStarts.map((t) => base + t);
     const tThink = base + sched.tThinkingStart;
     const tSus = base + sched.tSuspenseStart;
     const tReveal = base + sched.tRevealStart;
+    const optCount = slide?.slideType === 'trueFalse' ? 2 : 4;
+    const hasAnyOptVoice = Array.from({ length: optCount }).some((_, oi) =>
+      Boolean(slide?.voiceover?.options?.[oi]?.dataUrl)
+    );
 
     if (prevTime < tQ && currTime >= tQ) {
-      events.push({ type: 'questionEnter', slideIndex: sIdx });
+      const qMaxDur = slide?.voiceover?.question?.dataUrl
+        ? Math.max(0.15, (hasAnyOptVoice ? tOpts[0] : tThink) - tQ - 0.02)
+        : Math.max(0.15, tOpts[0] - tQ - 0.02);
+      events.push({
+        type: 'questionEnter',
+        slideIndex: sIdx,
+        maxDuration: qMaxDur,
+      });
     }
 
-    const optCount = slides[sIdx]?.slideType === 'trueFalse' ? 2 : 4;
-    tOpts.forEach((tOpt, oIdx) => {
-      if (oIdx >= optCount) return;
-      if (prevTime < tOpt && currTime >= tOpt) {
-        const sameTimeAsPrev = oIdx > 0 && Math.abs(tOpt - tOpts[oIdx - 1]) < 0.01;
-        const hasOwnVoice = Boolean(slides[sIdx]?.voiceover?.options?.[oIdx]?.dataUrl);
-        if (!sameTimeAsPrev || hasOwnVoice) {
-          events.push({ type: 'optionEnter', slideIndex: sIdx, optionIndex: oIdx });
+    let optVoiceCursor = tOpts[0] ?? tQ;
+    for (let oIdx = 0; oIdx < optCount; oIdx++) {
+      const tOpt = tOpts[oIdx];
+      const oClip = slide?.voiceover?.options?.[oIdx];
+      const sameTimeAsPrev = oIdx > 0 && Math.abs(tOpt - tOpts[oIdx - 1]) < 0.01;
+      let groupEndBoundary = tThink;
+      for (let k = oIdx + 1; k < optCount; k++) {
+        if (tOpts[k] > tOpt + 0.01) {
+          groupEndBoundary = tOpts[k];
+          break;
         }
       }
-    });
+      const isGroupedSameStart =
+        oIdx < optCount - 1 && Math.abs(tOpts[oIdx + 1] - tOpt) < 0.01;
+
+      if (oClip?.dataUrl) {
+        const scheduledStart = isGroupedSameStart || sameTimeAsPrev
+          ? Math.max(tOpt, optVoiceCursor)
+          : tOpt;
+        const maxBound = Math.max(scheduledStart + 0.15, groupEndBoundary - 0.02);
+        if (scheduledStart < maxBound - 0.04) {
+          if (prevTime < scheduledStart && currTime >= scheduledStart) {
+            events.push({
+              type: 'optionEnter',
+              slideIndex: sIdx,
+              optionIndex: oIdx,
+              maxDuration: Math.max(0.15, maxBound - scheduledStart),
+            });
+          }
+          const clipDur = oClip.duration > 0.05 ? oClip.duration : 1.0;
+          optVoiceCursor = Math.min(maxBound, scheduledStart + clipDur + 0.04);
+        }
+      } else if (!sameTimeAsPrev && prevTime < tOpt && currTime >= tOpt) {
+        events.push({
+          type: 'optionEnter',
+          slideIndex: sIdx,
+          optionIndex: oIdx,
+          maxDuration: Math.max(0.15, groupEndBoundary - tOpt - 0.02),
+        });
+      }
+    }
 
     const totalTicks = Math.floor(timing.thinkingDuration);
+    const urgentThreshold = Math.max(1, Math.min(10, template?.timerUrgentThreshold ?? 3));
     for (let sec = 0; sec < totalTicks; sec++) {
       const tTick = tThink + sec;
       const tickSecond = totalTicks - sec;
@@ -115,17 +186,26 @@ export function collectSoundEventsInInterval(
           type: 'countdownTick',
           slideIndex: sIdx,
           tickSecond,
-          urgent: tickSecond <= 3,
+          urgent: tickSecond <= urgentThreshold,
+          maxDuration: Math.max(0.08, Math.min(0.88, tSus - tTick - 0.02)),
         });
       }
     }
 
     if ((timing.suspenseDuration ?? 0) > 0 && prevTime < tSus && currTime >= tSus) {
-      events.push({ type: 'suspense', slideIndex: sIdx });
+      events.push({
+        type: 'suspense',
+        slideIndex: sIdx,
+        maxDuration: Math.max(0.15, tReveal - tSus - 0.02),
+      });
     }
 
     if (prevTime < tReveal && currTime >= tReveal) {
-      events.push({ type: 'correctReveal', slideIndex: sIdx });
+      events.push({
+        type: 'correctReveal',
+        slideIndex: sIdx,
+        maxDuration: Math.max(0.25, nextSlideStart - tReveal - 0.03),
+      });
     }
   }
 
@@ -262,7 +342,11 @@ function isBackgroundDark(template: TemplateSettings): boolean {
     return isColorDark(template.solidBgColor || '#0c0c0c', template.bgDimOpacity);
   }
   if (template.backgroundType === 'preset') {
-    if (template.presetId === 'channelSand' || template.presetId === 'parchmentGold') {
+    if (
+      template.presetId === 'channelSand' ||
+      template.presetId === 'parchmentGold' ||
+      template.presetId === 'mintEditorial'
+    ) {
       return template.bgDimOpacity >= 0.35;
     }
     return true;
@@ -313,6 +397,45 @@ function traceBoxPath(
     ctx.closePath();
     return;
   }
+  if (boxStyle === 'chamfer') {
+    const cut = Math.min(w * 0.12, h * 0.34, Math.max(18, r * 0.72));
+    ctx.beginPath();
+    ctx.moveTo(x + cut, y);
+    ctx.lineTo(x + w - cut, y);
+    ctx.lineTo(x + w, y + cut);
+    ctx.lineTo(x + w, y + h - cut);
+    ctx.lineTo(x + w - cut, y + h);
+    ctx.lineTo(x + cut, y + h);
+    ctx.lineTo(x, y + h - cut);
+    ctx.lineTo(x, y + cut);
+    ctx.closePath();
+    return;
+  }
+  if (boxStyle === 'pill3d') {
+    drawRoundedRect(ctx, x, y, w, h, Math.min(w, h) / 2);
+    return;
+  }
+  if (boxStyle === 'ticket') {
+    const notch = Math.min(20, Math.max(11, h * 0.14));
+    const rr = Math.max(8, Math.min(r, w * 0.18, h * 0.32));
+    const midY = y + h / 2;
+    ctx.beginPath();
+    ctx.moveTo(x + rr, y);
+    ctx.lineTo(x + w - rr, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + rr);
+    ctx.lineTo(x + w, midY - notch);
+    ctx.arc(x + w, midY, notch, -Math.PI / 2, Math.PI / 2, true);
+    ctx.lineTo(x + w, y + h - rr);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - rr, y + h);
+    ctx.lineTo(x + rr, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - rr);
+    ctx.lineTo(x, midY + notch);
+    ctx.arc(x, midY, notch, Math.PI / 2, -Math.PI / 2, true);
+    ctx.lineTo(x, y + rr);
+    ctx.quadraticCurveTo(x, y, x + rr, y);
+    ctx.closePath();
+    return;
+  }
   drawRoundedRect(ctx, x, y, w, h, r);
 }
 
@@ -357,7 +480,7 @@ function resolveBoxStrokeStyle(
   baseColor: string,
   borderStyle: BoxBorderStyle
 ): string | CanvasGradient {
-  if (borderStyle === 'gradientGold') {
+  if (borderStyle === 'gradientGold' || borderStyle === 'dashedGold') {
     const grad = ctx.createLinearGradient(x, y, x + w, y + h);
     grad.addColorStop(0, '#fff3b0');
     grad.addColorStop(0.28, '#e5b84b');
@@ -371,6 +494,23 @@ function resolveBoxStrokeStyle(
     grad.addColorStop(0, '#22d3ee');
     grad.addColorStop(0.5, '#a855f7');
     grad.addColorStop(1, '#ec4899');
+    return grad;
+  }
+  if (borderStyle === 'metallicSilver') {
+    const grad = ctx.createLinearGradient(x, y, x + w, y + h);
+    grad.addColorStop(0, '#ffffff');
+    grad.addColorStop(0.25, '#cbd5e1');
+    grad.addColorStop(0.55, '#64748b');
+    grad.addColorStop(0.8, '#f1f5f9');
+    grad.addColorStop(1, '#94a3b8');
+    return grad;
+  }
+  if (borderStyle === 'gradientSunset') {
+    const grad = ctx.createLinearGradient(x, y, x + w, y + h);
+    grad.addColorStop(0, '#fde047');
+    grad.addColorStop(0.35, '#fb923c');
+    grad.addColorStop(0.7, '#f43f5e');
+    grad.addColorStop(1, '#a855f7');
     return grad;
   }
   return baseColor;
@@ -428,10 +568,10 @@ function drawStyledBoxContainer(
 
   const isMillionaire = boxStyle === 'millionaireHex';
 
-  // Optional side wing lines for Millionaire hexagonal frames
+  // Optional side wing lines for Millionaire hexagonal frames (clamped so wings stay strictly within stage margins)
   if (isMillionaire && wingExtensions && drawBorder) {
     ctx.save();
-    const wingLen = 54;
+    const wingLen = 44;
     const wingGradL = ctx.createLinearGradient(x - wingLen, 0, x, 0);
     wingGradL.addColorStop(0, 'rgba(229, 184, 75, 0)');
     wingGradL.addColorStop(1, borderColor || '#e5b84b');
@@ -475,11 +615,23 @@ function drawStyledBoxContainer(
       ctx.fill();
     }
 
-    // 3. 3D Extruded Bottom Lip for bevel3d
-    if (boxStyle === 'bevel3d') {
-      const lipDepth = 11;
+    // 2B. Stacked Backing Card for layeredCard
+    if (boxStyle === 'layeredCard') {
+      ctx.save();
+      traceBoxPath(ctx, x + 9, y + 10, w, h, radius, 'flat');
+      ctx.fillStyle = hexToRgba(borderColor || '#d4a73a', 0.32);
+      ctx.fill();
+      ctx.strokeStyle = hexToRgba(borderColor || '#d4a73a', 0.72);
+      ctx.lineWidth = Math.max(2, borderWidth * 0.55);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // 3. 3D Extruded Bottom Lip for bevel3d / pill3d
+    if (boxStyle === 'bevel3d' || boxStyle === 'pill3d') {
+      const lipDepth = boxStyle === 'pill3d' ? 9 : 11;
       traceBoxPath(ctx, x, y + lipDepth, w, h, radius, boxStyle);
-      ctx.fillStyle = darkenHex(fillColorHex, 0.42);
+      ctx.fillStyle = darkenHex(fillColorHex, 0.44);
       ctx.fill();
     }
 
@@ -512,7 +664,35 @@ function drawStyledBoxContainer(
       ctx.fillStyle = fillRgba;
       ctx.fill();
       ctx.restore();
-    } else if (boxStyle === 'millionaireHex') {
+    } else if (boxStyle === 'minimalOutline') {
+      ctx.fillStyle = hexToRgba(fillColorHex, Math.min(opacity, 0.26));
+      ctx.fill();
+    } else if (boxStyle === 'broadcastBar') {
+      const bGrad = ctx.createLinearGradient(0, y, 0, y + h);
+      bGrad.addColorStop(0, hexToRgba(fillColorHex, Math.min(1, opacity)));
+      bGrad.addColorStop(0.52, fillRgba);
+      bGrad.addColorStop(1, darkenHex(fillColorHex, 0.34));
+      ctx.fillStyle = bGrad;
+      ctx.fill();
+
+      // Side broadcast accent stripes
+      ctx.save();
+      traceBoxPath(ctx, x, y, w, h, radius, boxStyle);
+      ctx.clip();
+      ctx.fillStyle = borderColor || '#fbbf24';
+      ctx.fillRect(x, y, 10, h);
+      ctx.fillRect(x + w - 10, y, 10, h);
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.22)';
+      ctx.fillRect(x, y, w, 4);
+      ctx.restore();
+    } else if (boxStyle === 'pill3d') {
+      const pGrad = ctx.createLinearGradient(0, y, 0, y + h);
+      pGrad.addColorStop(0, hexToRgba(fillColorHex, Math.min(1, opacity)));
+      pGrad.addColorStop(0.55, fillRgba);
+      pGrad.addColorStop(1, darkenHex(fillColorHex, 0.22));
+      ctx.fillStyle = pGrad;
+      ctx.fill();
+    } else if (boxStyle === 'millionaireHex' || boxStyle === 'chamfer') {
       const hexGrad = ctx.createLinearGradient(0, y, 0, y + h);
       hexGrad.addColorStop(0, hexToRgba(fillColorHex, Math.min(1, opacity)));
       hexGrad.addColorStop(0.5, fillRgba);
@@ -524,27 +704,24 @@ function drawStyledBoxContainer(
       ctx.fill();
     }
 
-    // 5. Recessed Inner Hollow (تجويف للداخل)
+    // 5. Recessed Inner Hollow or Special Inner Detail
     if (boxStyle === 'inset') {
       ctx.save();
       traceBoxPath(ctx, x, y, w, h, radius, boxStyle);
       ctx.clip();
 
-      // Top inner shadow
       const topShadow = ctx.createLinearGradient(0, y, 0, y + Math.min(40, h * 0.42));
       topShadow.addColorStop(0, 'rgba(0, 0, 0, 0.42)');
       topShadow.addColorStop(1, 'rgba(0, 0, 0, 0)');
       ctx.fillStyle = topShadow;
       ctx.fillRect(x, y, w, Math.min(40, h * 0.42));
 
-      // Bottom inner specular rim
       const botLight = ctx.createLinearGradient(0, y + h - Math.min(28, h * 0.3), 0, y + h);
       botLight.addColorStop(0, 'rgba(255, 255, 255, 0)');
       botLight.addColorStop(1, 'rgba(255, 255, 255, 0.22)');
       ctx.fillStyle = botLight;
       ctx.fillRect(x, y + h - Math.min(28, h * 0.3), w, Math.min(28, h * 0.3));
 
-      // Recessed inner bevel stroke
       if (w > 24 && h > 24) {
         traceBoxPath(ctx, x + 5, y + 5, w - 10, h - 10, Math.max(0, radius - 5), boxStyle);
         ctx.strokeStyle = 'rgba(0, 0, 0, 0.24)';
@@ -552,29 +729,71 @@ function drawStyledBoxContainer(
         ctx.stroke();
       }
       ctx.restore();
-    } else if ((boxGloss || enhanced) && boxStyle !== 'neon') {
+    } else if (boxStyle === 'ticket' && w > 80 && h > 40) {
+      ctx.save();
+      ctx.strokeStyle = hexToRgba(borderColor || '#FFFFFF', 0.38);
+      ctx.lineWidth = 2;
+      ctx.setLineDash([6, 6]);
+      ctx.beginPath();
+      ctx.moveTo(x + 26, y + 10);
+      ctx.lineTo(x + 26, y + h - 10);
+      ctx.moveTo(x + w - 26, y + 10);
+      ctx.lineTo(x + w - 26, y + h - 10);
+      ctx.stroke();
+      ctx.restore();
+    } else if ((boxGloss || enhanced) && boxStyle !== 'neon' && boxStyle !== 'minimalOutline') {
       applyBoxGloss(ctx, x, y, w, h, radius, enhanced, boxStyle);
     }
   }
 
   // 6. Box Border Styling
-  if (drawBorder && borderWidth > 0) {
+  if (drawBorder && (borderWidth > 0 || boxStyle === 'minimalOutline' || borderStyle === 'cornerBrackets')) {
+    const effLineW = Math.max(boxStyle === 'minimalOutline' ? 3 : 1.5, borderWidth);
     ctx.save();
     if (boxStyle === 'neon' || glowIntensity > 0.25) {
       ctx.shadowColor = borderColor || '#22d3ee';
       ctx.shadowBlur = Math.round((boxStyle === 'neon' ? 16 : 8) + glowIntensity * 20);
     }
 
+    if (borderStyle === 'dashedGold') {
+      ctx.setLineDash([14, 8]);
+    }
+
     traceBoxPath(ctx, x, y, w, h, radius, boxStyle);
     ctx.strokeStyle = resolveBoxStrokeStyle(ctx, x, y, w, h, borderColor, borderStyle);
-    ctx.lineWidth = borderWidth;
+    ctx.lineWidth = borderStyle === 'cornerBrackets' ? Math.max(1.5, effLineW * 0.45) : effLineW;
     ctx.stroke();
+    ctx.setLineDash([]);
 
-    if (borderStyle === 'double' && w > 28 && h > 28) {
+    if (borderStyle === 'cornerBrackets' && w > 40 && h > 40) {
+      const bLen = Math.min(28, Math.min(w, h) * 0.24);
+      const bOff = 4;
+      ctx.strokeStyle = borderColor || '#fb7185';
+      ctx.lineWidth = Math.max(4, effLineW + 1.5);
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      // Top-left
+      ctx.moveTo(x - bOff, y + bLen);
+      ctx.lineTo(x - bOff, y - bOff);
+      ctx.lineTo(x + bLen, y - bOff);
+      // Top-right
+      ctx.moveTo(x + w - bLen, y - bOff);
+      ctx.lineTo(x + w + bOff, y - bOff);
+      ctx.lineTo(x + w + bOff, y + bLen);
+      // Bottom-left
+      ctx.moveTo(x - bOff, y + h - bLen);
+      ctx.lineTo(x - bOff, y + h + bOff);
+      ctx.lineTo(x + bLen, y + h + bOff);
+      // Bottom-right
+      ctx.moveTo(x + w - bLen, y + h + bOff);
+      ctx.lineTo(x + w + bOff, y + h + bOff);
+      ctx.lineTo(x + w + bOff, y + h - bLen);
+      ctx.stroke();
+    } else if (borderStyle === 'double' && w > 28 && h > 28) {
       ctx.shadowBlur = 0;
       traceBoxPath(ctx, x + 7, y + 7, w - 14, h - 14, Math.max(0, radius - 6), boxStyle);
       ctx.strokeStyle = hexToRgba(borderColor || '#FFFFFF', 0.65);
-      ctx.lineWidth = Math.max(1.5, borderWidth * 0.42);
+      ctx.lineWidth = Math.max(1.5, effLineW * 0.42);
       ctx.stroke();
     } else if (boxStyle === 'neon' && w > 18 && h > 18) {
       ctx.shadowBlur = 0;
@@ -582,7 +801,7 @@ function drawStyledBoxContainer(
       ctx.strokeStyle = 'rgba(255, 255, 255, 0.55)';
       ctx.lineWidth = 1.4;
       ctx.stroke();
-    } else if (boxStyle === 'millionaireHex' && w > 28 && h > 28) {
+    } else if ((boxStyle === 'millionaireHex' || boxStyle === 'chamfer') && w > 28 && h > 28) {
       ctx.shadowBlur = 0;
       traceBoxPath(ctx, x + 5, y + 5, w - 10, h - 10, Math.max(0, radius - 5), boxStyle);
       ctx.strokeStyle = 'rgba(255, 244, 196, 0.32)';
@@ -595,12 +814,47 @@ function drawStyledBoxContainer(
 
 const wrapCache = new Map<string, string[]>();
 
+export function clearRendererCaches(): void {
+  wrapCache.clear();
+  bgCacheKey = '';
+}
+
+export async function ensureQuizFontsLoaded(primaryFont = 'Cairo'): Promise<void> {
+  if (typeof document === 'undefined' || !('fonts' in document)) return;
+  const families = Array.from(new Set([primaryFont, 'Cairo', 'Tajawal', 'Amiri', 'JetBrains Mono']));
+  const loads: Promise<FontFace[]>[] = [];
+  for (const fam of families) {
+    const weights = fam === 'JetBrains Mono' ? ['700', '800'] : ['700', '800', '900'];
+    const sizes = fam === 'JetBrains Mono' ? ['42px', '64px'] : ['34px', '52px', '72px'];
+    for (const w of weights) {
+      for (const sz of sizes) {
+        try {
+          loads.push(document.fonts.load(`${w} ${sz} '${fam}'`));
+        } catch {
+          // ignore
+        }
+      }
+    }
+  }
+  try {
+    await Promise.all([document.fonts.ready, ...loads]);
+  } catch {
+    try {
+      await document.fonts.ready;
+    } catch {
+      // ignore
+    }
+  }
+  wrapCache.clear();
+}
+
 function wrapArabicText(
   ctx: CanvasRenderingContext2D,
   text: string,
   maxWidth: number
 ): string[] {
-  const key = `${ctx.font}|${Math.round(maxWidth)}|${text}`;
+  const safeMaxW = Math.max(40, maxWidth);
+  const key = `${ctx.font}|${Math.round(safeMaxW)}|${text}`;
   const cached = wrapCache.get(key);
   if (cached) return cached;
 
@@ -616,7 +870,7 @@ function wrapArabicText(
     let currentLine = words[0];
     for (let i = 1; i < words.length; i++) {
       const testLine = `${currentLine} ${words[i]}`;
-      if (ctx.measureText(testLine).width <= maxWidth) {
+      if (ctx.measureText(testLine).width <= safeMaxW) {
         currentLine = testLine;
       } else {
         lines.push(currentLine);
@@ -809,10 +1063,14 @@ function drawProceduralPresetDecor(
   W: number,
   H: number
 ): void {
-  if (presetId === 'millionaire' || presetId === 'tvShowGold') {
-    // Dramatic twin spotlights from top corners
+  if (presetId === 'millionaire' || presetId === 'tvShowGold' || presetId === 'royalPurple') {
     const isMill = presetId === 'millionaire';
-    const beamColor = isMill ? 'rgba(110, 170, 255, 0.14)' : 'rgba(250, 204, 21, 0.13)';
+    const isRoyal = presetId === 'royalPurple';
+    const beamColor = isMill
+      ? 'rgba(110, 170, 255, 0.14)'
+      : isRoyal
+        ? 'rgba(192, 132, 252, 0.16)'
+        : 'rgba(250, 204, 21, 0.13)';
     for (const srcX of [W * 0.12, W * 0.88]) {
       const grad = bctx.createLinearGradient(srcX, 0, W * 0.5, H * 0.72);
       grad.addColorStop(0, beamColor);
@@ -827,9 +1085,12 @@ function drawProceduralPresetDecor(
       bctx.fill();
     }
 
-    // Concentric subtle stage studio rings behind the question stage
     bctx.save();
-    bctx.strokeStyle = isMill ? 'rgba(229, 184, 75, 0.11)' : 'rgba(250, 204, 21, 0.09)';
+    bctx.strokeStyle = isMill
+      ? 'rgba(229, 184, 75, 0.11)'
+      : isRoyal
+        ? 'rgba(251, 191, 36, 0.12)'
+        : 'rgba(250, 204, 21, 0.09)';
     bctx.lineWidth = 2;
     const cx = W * 0.5;
     const cy = H * 0.42;
@@ -839,9 +1100,10 @@ function drawProceduralPresetDecor(
       bctx.stroke();
     }
     bctx.restore();
-  } else if (presetId === 'neonCyber') {
+  } else if (presetId === 'neonCyber' || presetId === 'crimsonArena') {
+    const isCrimson = presetId === 'crimsonArena';
     bctx.save();
-    bctx.strokeStyle = 'rgba(34, 211, 238, 0.07)';
+    bctx.strokeStyle = isCrimson ? 'rgba(244, 63, 94, 0.08)' : 'rgba(34, 211, 238, 0.07)';
     bctx.lineWidth = 1.5;
     const step = 90;
     for (let x = 0; x <= W; x += step) {
@@ -857,16 +1119,76 @@ function drawProceduralPresetDecor(
       bctx.stroke();
     }
     const glow1 = bctx.createRadialGradient(W * 0.2, H * 0.2, 20, W * 0.2, H * 0.2, W * 0.45);
-    glow1.addColorStop(0, 'rgba(34, 211, 238, 0.18)');
-    glow1.addColorStop(1, 'rgba(34, 211, 238, 0)');
+    glow1.addColorStop(0, isCrimson ? 'rgba(244, 63, 94, 0.22)' : 'rgba(34, 211, 238, 0.18)');
+    glow1.addColorStop(1, 'rgba(0, 0, 0, 0)');
     bctx.fillStyle = glow1;
     bctx.fillRect(0, 0, W, H);
 
     const glow2 = bctx.createRadialGradient(W * 0.82, H * 0.78, 20, W * 0.82, H * 0.78, W * 0.45);
-    glow2.addColorStop(0, 'rgba(236, 72, 153, 0.16)');
-    glow2.addColorStop(1, 'rgba(236, 72, 153, 0)');
+    glow2.addColorStop(0, isCrimson ? 'rgba(251, 146, 60, 0.16)' : 'rgba(236, 72, 153, 0.16)');
+    glow2.addColorStop(1, 'rgba(0, 0, 0, 0)');
     bctx.fillStyle = glow2;
     bctx.fillRect(0, 0, W, H);
+    bctx.restore();
+  } else if (presetId === 'arcticCyan') {
+    bctx.save();
+    const aurora = bctx.createLinearGradient(0, 0, W, H * 0.65);
+    aurora.addColorStop(0, 'rgba(56, 189, 248, 0.18)');
+    aurora.addColorStop(0.5, 'rgba(186, 230, 253, 0.08)');
+    aurora.addColorStop(1, 'rgba(14, 165, 233, 0)');
+    bctx.fillStyle = aurora;
+    bctx.fillRect(0, 0, W, H);
+    bctx.strokeStyle = 'rgba(186, 230, 253, 0.12)';
+    bctx.lineWidth = 2;
+    for (const r of [W * 0.28, W * 0.46]) {
+      bctx.beginPath();
+      bctx.arc(W * 0.5, H * 0.28, r, 0, Math.PI * 2);
+      bctx.stroke();
+    }
+    bctx.restore();
+  } else if (presetId === 'sunsetCinema') {
+    bctx.save();
+    const sunGlow = bctx.createRadialGradient(W * 0.5, H * 0.26, 20, W * 0.5, H * 0.26, W * 0.56);
+    sunGlow.addColorStop(0, 'rgba(251, 146, 60, 0.26)');
+    sunGlow.addColorStop(0.55, 'rgba(244, 63, 94, 0.12)');
+    sunGlow.addColorStop(1, 'rgba(0, 0, 0, 0)');
+    bctx.fillStyle = sunGlow;
+    bctx.fillRect(0, 0, W, H);
+    bctx.restore();
+  } else if (presetId === 'ramadanLantern') {
+    bctx.save();
+    bctx.strokeStyle = 'rgba(234, 179, 8, 0.28)';
+    bctx.lineWidth = 3;
+    bctx.strokeRect(26, 26, W - 52, H - 52);
+    bctx.strokeStyle = 'rgba(234, 179, 8, 0.14)';
+    bctx.lineWidth = 1.5;
+    bctx.strokeRect(42, 42, W - 84, H - 84);
+    // Subtle eight-point stars in corners
+    const stars = [
+      [88, 88],
+      [W - 88, 88],
+      [88, H - 88],
+      [W - 88, H - 88],
+    ];
+    bctx.fillStyle = 'rgba(253, 230, 138, 0.16)';
+    for (const [sx, sy] of stars) {
+      bctx.save();
+      bctx.translate(sx, sy);
+      bctx.fillRect(-16, -16, 32, 32);
+      bctx.rotate(Math.PI / 4);
+      bctx.fillRect(-16, -16, 32, 32);
+      bctx.restore();
+    }
+    bctx.restore();
+  } else if (presetId === 'mintEditorial') {
+    bctx.save();
+    bctx.fillStyle = 'rgba(16, 185, 129, 0.08)';
+    bctx.beginPath();
+    bctx.arc(W * 0.14, H * 0.16, W * 0.22, 0, Math.PI * 2);
+    bctx.fill();
+    bctx.beginPath();
+    bctx.arc(W * 0.88, H * 0.84, W * 0.26, 0, Math.PI * 2);
+    bctx.fill();
     bctx.restore();
   } else if (presetId === 'parchmentGold') {
     bctx.save();
@@ -1009,11 +1331,15 @@ function drawAmbientParticles(
   H: number
 ): void {
   const isNeon = template.presetId === 'neonCyber' || template.borderStyle === 'gradientNeon';
+  const isCyan = template.presetId === 'arcticCyan';
+  const isSunset = template.presetId === 'sunsetCinema' || template.presetId === 'crimsonArena';
   const isGold =
     template.presetId === 'millionaire' ||
     template.presetId === 'tvShowGold' ||
     template.presetId === 'channelSand' ||
     template.presetId === 'parchmentGold' ||
+    template.presetId === 'royalPurple' ||
+    template.presetId === 'ramadanLantern' ||
     template.borderStyle === 'gradientGold';
 
   ctx.save();
@@ -1032,9 +1358,15 @@ function drawAmbientParticles(
       ? i % 2 === 0
         ? `rgba(34, 211, 238, ${alpha.toFixed(3)})`
         : `rgba(236, 72, 153, ${alpha.toFixed(3)})`
-      : isGold
-        ? `rgba(237, 214, 162, ${alpha.toFixed(3)})`
-        : `rgba(255, 255, 255, ${alpha.toFixed(3)})`;
+      : isCyan
+        ? `rgba(186, 230, 253, ${alpha.toFixed(3)})`
+        : isSunset
+          ? i % 2 === 0
+            ? `rgba(251, 146, 60, ${alpha.toFixed(3)})`
+            : `rgba(244, 63, 94, ${alpha.toFixed(3)})`
+          : isGold
+            ? `rgba(237, 214, 162, ${alpha.toFixed(3)})`
+            : `rgba(255, 255, 255, ${alpha.toFixed(3)})`;
 
     ctx.beginPath();
     ctx.arc(x, y, radius, 0, Math.PI * 2);
@@ -1042,6 +1374,47 @@ function drawAmbientParticles(
     ctx.fill();
   }
   ctx.restore();
+}
+
+function resolveBrandAnchor(
+  template: TemplateSettings,
+  W: number,
+  H: number
+): { anchorX: number; anchorY: number; size: number; handleHeight: number; handleEstW: number } {
+  const handle = (template.brandHandleText || '').trim();
+  const isWide = template.aspectRatio === '16:9';
+  const baseSize = Math.max(48, Math.min(240, template.brandLogoSize || 108));
+  const size = isWide ? Math.round(baseSize * 0.92) : baseSize;
+  const pos = template.brandLogoPosition || 'topRight';
+
+  const padX = isWide ? 48 : 36;
+  const padY = isWide ? 38 : 66;
+  const handleHeight = handle ? 32 : 0;
+  const handleEstW = handle ? Math.min(260, Math.round(handle.length * (isWide ? 14 : 15)) + 28) : 0;
+  const halfSpan = Math.max(size, handleEstW) / 2;
+
+  let anchorX = W - padX - halfSpan;
+  let anchorY = padY + size / 2;
+
+  if (pos === 'custom') {
+    anchorX = ((template.brandLogoX ?? 88) / 100) * W;
+    anchorY = ((template.brandLogoY ?? 10) / 100) * H;
+  } else if (pos === 'topLeft') {
+    anchorX = padX + halfSpan;
+    anchorY = padY + size / 2;
+  } else if (pos === 'bottomRight') {
+    anchorX = W - padX - halfSpan;
+    anchorY = H - padY - handleHeight - size / 2 - (isWide ? 0 : 120);
+  } else if (pos === 'bottomLeft') {
+    anchorX = padX + halfSpan;
+    anchorY = H - padY - handleHeight - size / 2 - (isWide ? 0 : 120);
+  }
+
+  const safeEdgeX = Math.min(padX, 24);
+  anchorX = Math.max(safeEdgeX + halfSpan, Math.min(W - safeEdgeX - halfSpan, anchorX));
+  anchorY = Math.max(16 + size / 2, Math.min(H - 16 - size / 2 - handleHeight, anchorY));
+
+  return { anchorX, anchorY, size, handleHeight, handleEstW };
 }
 
 function drawBrandWatermark(
@@ -1060,29 +1433,9 @@ function drawBrandWatermark(
   if (logoSrc && !logoImg && !handle) return;
 
   const isWide = template.aspectRatio === '16:9';
-  const baseSize = Math.max(48, Math.min(240, template.brandLogoSize || 108));
-  const size = isWide ? Math.round(baseSize * 0.92) : baseSize;
   const opacity = clamp01(template.brandOpacity ?? 0.92);
   const anim = template.brandLogoAnim || 'pulse';
-  const pos = template.brandLogoPosition || 'topRight';
-
-  const padX = isWide ? 48 : 36;
-  const padY = isWide ? 38 : 66;
-  const handleHeight = handle ? 32 : 0;
-
-  let anchorX = W - padX - size / 2;
-  let anchorY = padY + size / 2;
-
-  if (pos === 'topLeft') {
-    anchorX = padX + size / 2;
-    anchorY = padY + size / 2;
-  } else if (pos === 'bottomRight') {
-    anchorX = W - padX - size / 2;
-    anchorY = H - padY - handleHeight - size / 2 - (isWide ? 0 : 120);
-  } else if (pos === 'bottomLeft') {
-    anchorX = padX + size / 2;
-    anchorY = H - padY - handleHeight - size / 2 - (isWide ? 0 : 120);
-  }
+  const { anchorX, anchorY, size } = resolveBrandAnchor(template, W, H);
 
   let scale = 1;
   let offsetY = 0;
@@ -1148,8 +1501,9 @@ function drawBrandWatermark(
     const textW = ctx.measureText(handle).width;
     const pillW = Math.min(260, textW + 24);
     const pillH = 34;
+    const pillCX = Math.max(16 + pillW / 2, Math.min(W - 16 - pillW / 2, anchorX));
 
-    drawRoundedRect(ctx, anchorX - pillW / 2, labelY - pillH / 2, pillW, pillH, 10);
+    drawRoundedRect(ctx, pillCX - pillW / 2, labelY - pillH / 2, pillW, pillH, 10);
     ctx.fillStyle = 'rgba(11, 15, 23, 0.68)';
     ctx.fill();
     ctx.strokeStyle = 'rgba(237, 214, 162, 0.45)';
@@ -1157,7 +1511,7 @@ function drawBrandWatermark(
     ctx.stroke();
 
     ctx.fillStyle = '#EDD6A2';
-    ctx.fillText(handle, anchorX, labelY + 1);
+    ctx.fillText(handle, pillCX, labelY + 1);
   }
 
   ctx.restore();
@@ -1196,6 +1550,83 @@ function drawRevealConfetti(
   ctx.restore();
 }
 
+function getPrizeLadderMetrics(
+  template: TemplateSettings,
+  slideCount: number,
+  W: number,
+  H: number,
+  hasDiffPill: boolean
+): {
+  mode: 'sideColumn' | 'topStrip';
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+} | null {
+  if (!template.showPrizeLadder || slideCount <= 0) return null;
+  const isWide = template.aspectRatio === '16:9';
+  const style = template.prizeLadderStyle || 'topStrip';
+
+  if (style === 'sideColumn' && isWide) {
+    const panelTop = hasDiffPill ? 84 : 68;
+    const panelBottom = H - 64;
+    return {
+      mode: 'sideColumn',
+      x: 34,
+      y: panelTop,
+      w: 248,
+      h: panelBottom - panelTop,
+    };
+  }
+
+  const hasCornerBrandTop =
+    Boolean(template.brandLogoDataUrl || (template.brandHandleText || '').trim()) &&
+    (template.brandLogoPosition === 'topRight' ||
+      template.brandLogoPosition === 'topLeft' ||
+      !template.brandLogoPosition);
+
+  let topOffset =
+    template.showProgressCounter && slideCount > 1
+      ? isWide
+        ? 92
+        : 126
+      : isWide
+        ? 36
+        : hasDiffPill
+          ? 112
+          : 76;
+
+  // Compute safe horizontal corridor between corner brand & diffPill if strip shares top row
+  const stripH = style === 'sideColumn' ? 92 : 74;
+  let maxAvailableStripW = isWide ? 780 : 820;
+  if (hasCornerBrandTop) {
+    const bAnchor = resolveBrandAnchor(template, W, H);
+    const brandHandleW = (template.brandHandleText || '').trim() ? 260 : 0;
+    const brandSpanW = Math.max(bAnchor.size, brandHandleW);
+    const brandEdgeDist = (isWide ? 48 : 36) + brandSpanW + 18;
+    const clearBetweenCorners = W - Math.max(brandEdgeDist * 2, (hasDiffPill ? 196 : 0) + brandEdgeDist);
+    if (clearBetweenCorners < 460) {
+      // Drop topStrip cleanly below the corner brand so it NEVER overlaps logo or handle
+      const brandBottom = bAnchor.anchorY + bAnchor.size / 2 + (bAnchor.handleHeight > 0 ? 40 : 8);
+      topOffset = Math.max(topOffset, brandBottom + 14);
+      maxAvailableStripW = isWide ? 780 : W - 72;
+    } else {
+      maxAvailableStripW = Math.min(maxAvailableStripW, clearBetweenCorners);
+    }
+  } else if (hasDiffPill && topOffset < 104) {
+    maxAvailableStripW = Math.min(maxAvailableStripW, W - 400);
+  }
+
+  const stripW = Math.max(440, Math.min(isWide ? 780 : 860, maxAvailableStripW));
+  return {
+    mode: 'topStrip',
+    x: (W - stripW) / 2,
+    y: topOffset,
+    w: stripW,
+    h: stripH,
+  };
+}
+
 function drawPrizeLadder(
   ctx: CanvasRenderingContext2D,
   template: TemplateSettings,
@@ -1205,22 +1636,19 @@ function drawPrizeLadder(
   revealElapsed: number,
   W: number,
   H: number,
-  fontStack: string
+  fontStack: string,
+  hasDiffPill: boolean
 ): void {
-  if (!template.showPrizeLadder || slideCount <= 0) return;
+  const metrics = getPrizeLadderMetrics(template, slideCount, W, H, hasDiffPill);
+  if (!metrics) return;
 
   const tiers = getSlidePrizeTiers(slideCount, template.prizeLadderAmounts);
   const currentAmount = tiers[Math.min(activeSlideIndex, tiers.length - 1)] || '';
   const isWide = template.aspectRatio === '16:9';
-  const style = template.prizeLadderStyle || 'topStrip';
   const title = (template.prizeLadderTitle || 'الجائزة').trim();
 
-  if (style === 'sideColumn' && isWide) {
-    // Full vertical Millionaire money ladder on the left of 16:9 widescreen
-    const panelW = 248;
-    const panelX = 34;
-    const panelTop = 76;
-    const panelBottom = H - 76;
+  if (metrics.mode === 'sideColumn') {
+    const { x: panelX, y: panelTop, w: panelW, h: panelH } = metrics;
     const maxVisible = Math.min(15, tiers.length);
 
     let startIdx = 0;
@@ -1228,7 +1656,6 @@ function drawPrizeLadder(
       startIdx = Math.max(0, Math.min(tiers.length - maxVisible, activeSlideIndex - Math.floor(maxVisible / 2)));
     }
     const visibleTiers = tiers.slice(startIdx, startIdx + maxVisible);
-    const panelH = panelBottom - panelTop;
     const rowH = Math.min(54, (panelH - 54) / Math.max(1, visibleTiers.length));
     const actualH = 54 + visibleTiers.length * rowH + 14;
     const startY = panelTop + (panelH - actualH) / 2;
@@ -1282,13 +1709,9 @@ function drawPrizeLadder(
     return;
   }
 
-  // Compact Top Strip (9:16 & 16:9 friendly, or compact top card for sideColumn on 9:16)
+  // Compact Top Strip (9:16 & 16:9 friendly)
   ctx.save();
-  const topOffset = template.showProgressCounter && slideCount > 1 ? (isWide ? 96 : 134) : isWide ? 40 : 88;
-  const stripW = isWide ? 780 : 820;
-  const stripH = style === 'sideColumn' ? 92 : 74;
-  const stripX = (W - stripW) / 2;
-  const stripY = topOffset;
+  const { x: stripX, y: stripY, w: stripW, h: stripH } = metrics;
 
   traceBoxPath(ctx, stripX, stripY, stripW, stripH, 24, template.boxStyle || 'millionaireHex');
   ctx.fillStyle = 'rgba(7, 17, 52, 0.88)';
@@ -1305,8 +1728,8 @@ function drawPrizeLadder(
   ctx.lineWidth = 3;
   ctx.stroke();
 
-  // Current tier badge on right
-  const badgeW = 240;
+  // Current tier badge on right (scales proportionally when narrow corner corridors exist)
+  const badgeW = Math.min(240, Math.max(145, Math.round(stripW * 0.34)));
   const badgeX = stripX + stripW - badgeW - 18;
   const badgeY = stripY + 10;
   const badgeH = stripH - 20;
@@ -1322,7 +1745,12 @@ function drawPrizeLadder(
   ctx.lineWidth = 2;
   ctx.stroke();
 
-  ctx.font = `900 ${isWide ? 28 : 30}px ${fontStack}`;
+  let tierFont = badgeW < 190 ? 22 : isWide ? 28 : 30;
+  ctx.font = `900 ${tierFont}px ${fontStack}`;
+  while (tierFont > 16 && ctx.measureText(currentAmount).width > badgeW - 32) {
+    tierFont -= 2;
+    ctx.font = `900 ${tierFont}px ${fontStack}`;
+  }
   ctx.direction = 'ltr';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
@@ -1375,6 +1803,1130 @@ function drawPrizeLadder(
   ctx.restore();
 }
 
+export interface StageLayerRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  outerX: number;
+  outerY: number;
+  outerW: number;
+  outerH: number;
+}
+
+export interface StageLayerLayout {
+  W: number;
+  H: number;
+  isWide: boolean;
+  isFreeLayout: boolean;
+  wideLeftBound: number;
+  wideRightBound: number;
+  wideAvailW: number;
+  wideCenterX: number;
+  shiftForWideLadder: number;
+  topSafeFloor: number;
+  bottomMargin: number;
+  bottomSafeLimit: number;
+  protrusions: {
+    qTop: number;
+    qBottom: number;
+    qSide: number;
+    optTop: number;
+    optBottom: number;
+    optSide: number;
+  };
+  header: {
+    progress?: StageLayerRect;
+    diffPill?: StageLayerRect;
+    prizeLadder?: StageLayerRect;
+    brand?: StageLayerRect;
+  };
+  badge?: StageLayerRect & {
+    centerX: number;
+    centerY: number;
+    boxW: number;
+    boxH: number;
+    font: number;
+    scale: number;
+    text: string;
+  };
+  image?: StageLayerRect & {
+    centerX: number;
+    centerY: number;
+    frameW: number;
+    frameH: number;
+  };
+  question: StageLayerRect & {
+    centerX: number;
+    centerY: number;
+    w: number;
+    h: number;
+    fontSize: number;
+    lines: string[];
+    lineHeight: number;
+    hasMath: boolean;
+    padX: number;
+    padY: number;
+    rawText: string;
+  };
+  options: {
+    areaCenterX: number;
+    startPx: number;
+    bottomPx: number;
+    totalH: number;
+    totalW: number;
+    optH: number;
+    rowGap: number;
+    colGap: number;
+    customColGap: number;
+    vertCenterGap: number;
+    isCenteredVerticalSplit: boolean;
+    verticalSplitIdx: number;
+    items: (StageLayerRect & { centerX: number; centerY: number; boxW: number; boxH: number })[];
+  };
+  timer: StageLayerRect & {
+    enabled: boolean;
+    placement: TimerPlacement;
+    centerX: number;
+    centerY: number;
+    boxW: number;
+    boxH: number;
+    effectiveScale: number;
+    gapTop: number;
+    gapBottom: number;
+  };
+  explanation?: StageLayerRect & {
+    centerX: number;
+    centerY: number;
+    boxW: number;
+    boxH: number;
+    lines: string[];
+    hasMath: boolean;
+    fontSize: number;
+    text: string;
+  };
+}
+
+function makeLayerRect(
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  padTop = 0,
+  padBottom = 0,
+  padLeft = 0,
+  padRight = 0
+): StageLayerRect {
+  return {
+    x,
+    y,
+    w,
+    h,
+    outerX: x - padLeft,
+    outerY: y - padTop,
+    outerW: w + padLeft + padRight,
+    outerH: h + padTop + padBottom,
+  };
+}
+
+export function rectsIntersect(a: StageLayerRect, b: StageLayerRect, minGap = 2): boolean {
+  return (
+    a.outerX < b.outerX + b.outerW + minGap &&
+    a.outerX + a.outerW + minGap > b.outerX &&
+    a.outerY < b.outerY + b.outerH + minGap &&
+    a.outerY + a.outerH + minGap > b.outerY
+  );
+}
+
+export function computeStageLayerLayout(
+  ctx: CanvasRenderingContext2D,
+  slide: QuestionSlide,
+  slideCount: number,
+  template: TemplateSettings,
+  timing: TimingSettings,
+  slideImgDimensions?: { width: number; height: number } | null
+): StageLayerLayout {
+  const { width: W, height: H } = getCanvasDimensions(template);
+  const isWide = template.aspectRatio === '16:9';
+  const isFreeLayout = Boolean(template.freeLayoutMode);
+  const fontStack = `'${template.fontFamily}', 'Cairo', 'Tajawal', sans-serif`;
+  const isChannelLayout = template.optionsLayout === 'channel2x2';
+  const isTrueFalse = slide.slideType === 'trueFalse';
+  const boxStyle: BoxShapeStyle = template.boxStyle || 'flat';
+  const borderStyle: BoxBorderStyle = template.borderStyle || 'solid';
+  const timerScale = Math.max(0.5, Math.min(1.8, template.timerScale ?? 1));
+  const badgeScale = Math.max(0.6, Math.min(1.8, template.badgeScale ?? 1));
+
+  // Real visual protrusion envelopes (lips, stacked cards, brackets, reveal scale/glow, wings)
+  const bevelLip = boxStyle === 'bevel3d' ? 12 : boxStyle === 'pill3d' ? 10 : boxStyle === 'layeredCard' ? 11 : 0;
+  const layeredSide = boxStyle === 'layeredCard' ? 10 : 0;
+  const bracketPad = borderStyle === 'cornerBrackets' ? 5 : 0;
+  const haloPad = (template.glowIntensity ?? 0) > 0.05 ? 6 : 3;
+
+  const qTop = Math.max(haloPad, bracketPad);
+  const qBottom = Math.max(bevelLip, haloPad, bracketPad) + 3;
+  const qSide = Math.max(layeredSide, haloPad, bracketPad);
+  const optTop = Math.max(haloPad, bracketPad) + 4;
+  const optBottom = Math.max(bevelLip, haloPad, bracketPad) + 5;
+  const optSide = Math.max(layeredSide, haloPad, bracketPad) + 4;
+
+  // === Layer 1: Header Chrome ===
+  const diffMode = slide.difficulty || 'none';
+  const hasDiffPill = diffMode !== 'none';
+  const hasProgress = Boolean(template.showProgressCounter && slideCount > 1);
+  const hasBrand = Boolean(template.brandLogoDataUrl || (template.brandHandleText || '').trim());
+  const brandPos = template.brandLogoPosition || 'topRight';
+  const hasTopCornerBrand = hasBrand && (brandPos === 'topRight' || brandPos === 'topLeft');
+  const hasBottomCornerBrand = hasBrand && (brandPos === 'bottomRight' || brandPos === 'bottomLeft');
+
+  let brandRect: StageLayerRect | undefined;
+  if (hasBrand) {
+    const bAnchor = resolveBrandAnchor(template, W, H);
+    const visW = Math.max(bAnchor.size, bAnchor.handleEstW);
+    const topEdge = bAnchor.anchorY - bAnchor.size / 2;
+    const totalH = bAnchor.size + (bAnchor.handleHeight > 0 ? 38 : 0);
+    brandRect = makeLayerRect(bAnchor.anchorX - visW / 2, topEdge, visW, totalH, 4, 4, 4, 4);
+  }
+
+  let diffPillRect: StageLayerRect | undefined;
+  if (hasDiffPill) {
+    const placeRightSide = hasTopCornerBrand && brandPos === 'topLeft';
+    const pillW = isWide ? 148 : 138;
+    const pillH = 40;
+    const marginX = isWide ? 48 : 36;
+    const pillX = placeRightSide ? W - marginX - pillW : marginX;
+    const pillY = (isWide ? 42 : 76) - pillH / 2;
+    diffPillRect = makeLayerRect(pillX, pillY, pillW, pillH, 2, 2, 2, 2);
+  }
+
+  let progressRect: StageLayerRect | undefined;
+  if (hasProgress) {
+    let progW = isWide ? 320 : 280;
+    const progY = isWide ? 42 : 76;
+    if (brandRect && hasTopCornerBrand) {
+      const corridorHalf = Math.min(
+        Math.abs(W / 2 - brandRect.outerX),
+        Math.abs(brandRect.outerX + brandRect.outerW - W / 2)
+      );
+      if (brandRect.outerX < W / 2 + progW / 2 && brandRect.outerX + brandRect.outerW > W / 2 - progW / 2) {
+        progW = Math.max(170, Math.min(progW, corridorHalf * 2 - 20));
+      }
+    }
+    progressRect = makeLayerRect(W / 2 - progW / 2, progY - 18, progW, 38, 2, 2, 2, 2);
+  }
+
+  const ladderMetrics = getPrizeLadderMetrics(template, slideCount, W, H, hasDiffPill);
+  const prizeLadderRect = ladderMetrics
+    ? makeLayerRect(ladderMetrics.x, ladderMetrics.y, ladderMetrics.w, ladderMetrics.h, 3, 3, 3, 3)
+    : undefined;
+
+  const shiftForWideLadder = ladderMetrics?.mode === 'sideColumn' ? 126 : 0;
+  const wideLeftBound = ladderMetrics?.mode === 'sideColumn' ? ladderMetrics.x + ladderMetrics.w + 26 : 48;
+  const wideRightBound = W - 48;
+  const wideAvailW = wideRightBound - wideLeftBound;
+  const wideCenterX = (wideLeftBound + wideRightBound) / 2;
+
+  let topSafeFloor = isWide ? 24 : 44;
+  if (progressRect) {
+    topSafeFloor = Math.max(topSafeFloor, progressRect.outerY + progressRect.outerH + 14);
+  }
+  if (diffPillRect) {
+    topSafeFloor = Math.max(topSafeFloor, diffPillRect.outerY + diffPillRect.outerH + 14);
+  }
+  if (prizeLadderRect && ladderMetrics?.mode === 'topStrip') {
+    topSafeFloor = Math.max(topSafeFloor, prizeLadderRect.outerY + prizeLadderRect.outerH + 16);
+  }
+  if (brandRect && hasTopCornerBrand && !isFreeLayout) {
+    topSafeFloor = Math.max(topSafeFloor, brandRect.outerY + brandRect.outerH + 14);
+  }
+
+  // === Layer 2: Top Badge ===
+  const safeBadge = (slide.badgeText ?? '').trim();
+  const hasTopBadge = Boolean(template.showBadge && safeBadge);
+  let badgeData: StageLayerLayout['badge'];
+  let contentTopFloor = topSafeFloor;
+  if (hasTopBadge) {
+    let badgeFont = isWide ? 34 : 32;
+    ctx.font = `700 ${badgeFont}px ${fontStack}`;
+    ctx.direction = 'rtl';
+    let textW = ctx.measureText(safeBadge).width;
+    const padX = 46;
+    const maxBadgeBoxW = isWide ? Math.min(wideAvailW - 40, 760) : W - 140;
+    while (badgeFont > 20 && textW + padX * 2 > maxBadgeBoxW) {
+      badgeFont -= 2;
+      ctx.font = `700 ${badgeFont}px ${fontStack}`;
+      textW = ctx.measureText(safeBadge).width;
+    }
+    const boxW = Math.min(maxBadgeBoxW, textW + padX * 2);
+    const boxH = 66;
+    const visW = boxW * badgeScale;
+    const visH = boxH * badgeScale;
+    const rawBadgeCenterX =
+      isWide && !isFreeLayout && (template.badgeX ?? 50) === 50
+        ? wideCenterX
+        : ((template.badgeX ?? 50) / 100) * W + shiftForWideLadder;
+    const centerX = isFreeLayout
+      ? rawBadgeCenterX
+      : Math.max(
+          (isWide ? wideLeftBound : 24) + visW / 2,
+          Math.min((isWide ? wideRightBound : W - 24) - visW / 2, rawBadgeCenterX)
+        );
+    const desiredBadgeY =
+      isWide && !isFreeLayout
+        ? Math.min(H * 0.16, (template.badgeY / 100) * H)
+        : (template.badgeY / 100) * H;
+    const centerY = isFreeLayout
+      ? desiredBadgeY
+      : Math.max(topSafeFloor + visH / 2 + 6, desiredBadgeY);
+
+    badgeData = {
+      ...makeLayerRect(centerX - visW / 2, centerY - visH / 2, visW, visH, 2, 2, 2, 2),
+      centerX,
+      centerY,
+      boxW,
+      boxH,
+      font: badgeFont,
+      scale: badgeScale,
+      text: safeBadge,
+    };
+    if (!isFreeLayout) {
+      contentTopFloor = centerY + visH / 2 + 16;
+    }
+  }
+
+  // === Layer 3 & 4: Slide Image & Question Box Measurements ===
+  const hasSlideImg = Boolean(slideImgDimensions && slideImgDimensions.width > 0 && slideImgDimensions.height > 0);
+  const imgAspect = hasSlideImg
+    ? slideImgDimensions!.width / Math.max(1, slideImgDimensions!.height)
+    : 1;
+  let estWideImgW = 0;
+  if (hasSlideImg && isWide && !isFreeLayout) {
+    estWideImgW = Math.min(360, imgAspect >= 1 ? 360 : 280 * imgAspect);
+  }
+
+  const userQW = (Math.max(30, Math.min(98, template.questionWidth || 78)) / 100) * W;
+  const wingReserve = boxStyle === 'millionaireHex' && !isWide ? 88 : 0;
+  const wideMaxQW = hasSlideImg ? Math.max(400, wideAvailW - estWideImgW - 56) : wideAvailW;
+  const qW =
+    isWide && !isFreeLayout
+      ? Math.min(wideMaxQW, userQW)
+      : isFreeLayout
+        ? userQW
+        : Math.min(W - 24 - qSide * 2 - wingReserve, userQW);
+
+  const qPadX = isWide ? 48 : 28;
+  let qPadY = isWide ? 26 : 22;
+  const qRawText = slide.question || 'اكتب نص السؤال هنا';
+  const qHasMath = hasMathSyntax(qRawText);
+
+  let qFontSize =
+    isWide && !isFreeLayout
+      ? Math.min(68, Math.max(42, Math.round(template.questionFontSize * 0.88)))
+      : template.questionFontSize;
+
+  if (isChannelLayout && !isWide && !isFreeLayout) {
+    if (qRawText.length > 65) qFontSize = Math.round(qFontSize * 0.62);
+    else if (qRawText.length > 38) qFontSize = Math.round(qFontSize * 0.78);
+  } else if (isWide && !isFreeLayout && qRawText.length > 75) {
+    qFontSize = Math.round(qFontSize * 0.8);
+  }
+
+  ctx.font = `800 ${qFontSize}px ${fontStack}`;
+  ctx.direction = 'rtl';
+  let qLines = qHasMath ? [qRawText] : wrapArabicText(ctx, qRawText, qW - qPadX * 2);
+  if (!isFreeLayout && !qHasMath && qLines.length > 3 && qFontSize > 34) {
+    qFontSize = Math.max(34, Math.round(qFontSize * 0.82));
+    ctx.font = `800 ${qFontSize}px ${fontStack}`;
+    qLines = wrapArabicText(ctx, qRawText, qW - qPadX * 2);
+  }
+
+  let minChannelQH =
+    (template.questionHeightPct ?? 0) > 0
+      ? isWide && !isFreeLayout && template.questionHeightPct === 16
+        ? Math.round(H * 0.2)
+        : (template.questionHeightPct / 100) * H
+      : 0;
+
+  if (template.autoFitText && !qHasMath) {
+    const targetMaxH = minChannelQH > 0 ? minChannelQH - qPadY * 2 : Infinity;
+    while (
+      qFontSize > 28 &&
+      (qLines.length > 3 || qLines.length * (qFontSize * 1.28) > targetMaxH)
+    ) {
+      qFontSize -= 2;
+      ctx.font = `800 ${qFontSize}px ${fontStack}`;
+      qLines = wrapArabicText(ctx, qRawText, qW - qPadX * 2);
+    }
+  }
+
+  const measureQuestionBlock = (fSize: number, padY: number, minH: number) => {
+    const lH = fSize * (qHasMath ? 1.45 : 1.28);
+    let lines = qLines;
+    if (!qHasMath) {
+      ctx.font = `800 ${fSize}px ${fontStack}`;
+      ctx.direction = 'rtl';
+      lines = wrapArabicText(ctx, qRawText, qW - qPadX * 2);
+    }
+    const textH = qHasMath
+      ? Math.max(lH, measureSmartQuizTextHeight(ctx, qRawText, qW - qPadX * 2, fSize, fontStack, 800, 3))
+      : Math.max(lH, lines.length * lH);
+    const totalH = Math.max(minH, textH + padY * 2);
+    return { lH, lines, totalH };
+  };
+
+  let qMetrics = measureQuestionBlock(qFontSize, qPadY, minChannelQH);
+  let qLineHeight = qMetrics.lH;
+  qLines = qMetrics.lines;
+  let qH = qMetrics.totalH;
+
+  let imgFrameW = 0;
+  let imgFrameH = 0;
+  const sizeImgFrame = (maxBoxH: number) => {
+    if (!hasSlideImg) {
+      imgFrameW = 0;
+      imgFrameH = 0;
+      return;
+    }
+    if (isWide) {
+      const maxW = 360;
+      const clampedH = Math.min(maxBoxH, Math.max(170, Math.min(310, qH + 12)));
+      const effectiveClampH = maxBoxH < 170 ? Math.max(115, maxBoxH) : clampedH;
+      imgFrameW = imgAspect >= 1 ? maxW : Math.min(maxW, effectiveClampH * imgAspect);
+      imgFrameH = imgFrameW / imgAspect;
+      if (imgFrameH > effectiveClampH) {
+        imgFrameH = effectiveClampH;
+        imgFrameW = imgFrameH * imgAspect;
+      }
+    } else {
+      const maxW = 520;
+      imgFrameH = maxBoxH;
+      imgFrameW = Math.min(maxW, imgFrameH * imgAspect);
+      if (imgFrameW / imgAspect > maxBoxH) {
+        imgFrameH = imgFrameW / imgAspect;
+      }
+    }
+  };
+  sizeImgFrame(isWide ? 310 : 240);
+
+  const imgOuterPad = 12;
+  const minImgToQGap = imgOuterPad + qTop + 6;
+  let imgToQGap = hasSlideImg && !isWide ? Math.max(26, minImgToQGap) : 0;
+  const computeMinQCenterY = () =>
+    contentTopFloor +
+    (hasSlideImg && !isWide ? imgFrameH + imgOuterPad * 2 + imgToQGap : 4) +
+    (isWide && hasSlideImg ? Math.max(qH + qTop + qBottom, imgFrameH + imgOuterPad * 2) / 2 : qH / 2 + qTop);
+
+  let minQCenterY = computeMinQCenterY();
+  const desiredQCenterY =
+    isWide && !isFreeLayout
+      ? Math.max(142, Math.min(H * 0.34, (template.questionY / 100) * H * 0.78))
+      : (template.questionY / 100) * H;
+  let resolvedQCenterY = isFreeLayout ? desiredQCenterY : Math.max(minQCenterY, desiredQCenterY);
+
+  // === Layer 5 & 6: Options + Timer + Explanation Sizing ===
+  const optionCount = isTrueFalse ? 2 : 4;
+  const is2x2Layout = template.optionsLayout === 'channel2x2' || template.optionsLayout === 'grid2x2';
+  const rowsCount = !is2x2Layout ? (isTrueFalse ? 2 : 4) : isTrueFalse ? 1 : 2;
+  const userOptAreaW = (Math.max(35, Math.min(100, template.optionsWidth ?? 94)) / 100) * W;
+  const maxStageOptW = isWide && !isFreeLayout ? wideAvailW : W - 24 - optSide * 2;
+  let totalOptionsW = isWide && !isFreeLayout ? Math.min(wideAvailW, userOptAreaW) : Math.min(maxStageOptW, userOptAreaW);
+
+  const baseOptH =
+    isWide && !isFreeLayout
+      ? !is2x2Layout
+        ? Math.min(112, Math.max(72, Math.round(template.optionHeight * 0.72)))
+        : Math.min(156, Math.max(92, template.optionHeight))
+      : template.optionHeight;
+  let effectiveOptH =
+    isTrueFalse && is2x2Layout && !isFreeLayout
+      ? Math.max(baseOptH, isWide ? 156 : 178)
+      : baseOptH;
+
+  const userGap = Math.max(0, template.optionsGap ?? 26);
+  const customColGap = template.optionsColGap ?? 0;
+  const minVisualRowGap = optTop + optBottom + 4;
+  const minVisualColGap = optSide * 2 + 6;
+  let effectiveRowGap = isFreeLayout
+    ? userGap
+    : Math.max(minVisualRowGap, isWide ? Math.min(40, Math.max(14, userGap)) : userGap);
+  let effectiveColGap = isFreeLayout
+    ? customColGap > 0
+      ? customColGap
+      : userGap
+    : Math.max(minVisualColGap, customColGap > 0 ? customColGap : Math.max(14, userGap));
+
+  const hasTimerEnabled = template.timerStyle !== 'none' && timing.thinkingDuration > 0;
+  const timerPlacement: TimerPlacement = template.timerPlacement || 'aboveOptions';
+  let extraQGap = Math.max(0, Math.min(240, template.questionToOptionsGap ?? 0));
+  const extraCenterSpread = Math.max(0, Math.min(200, template.optionsCenterGap ?? 24));
+
+  const rawTimerBoxW =
+    template.timerStyle === 'bar'
+      ? timerPlacement === 'centerOfOptions'
+        ? Math.min(260, totalOptionsW * 0.44)
+        : totalOptionsW * 0.72
+      : template.timerStyle === 'pillCountdown'
+        ? (isWide ? 210 : 236) * timerScale
+        : template.timerStyle === 'channelBox' || template.timerStyle === 'hexBadge'
+          ? (isWide ? 128 : 144) * timerScale
+          : (isWide ? 106 : 120) * timerScale;
+  const rawTimerBoxH = !hasTimerEnabled
+    ? 0
+    : template.timerStyle === 'channelBox' || template.timerStyle === 'hexBadge'
+      ? (isWide ? 100 : 116) * timerScale
+      : template.timerStyle === 'circle' || template.timerStyle === 'neonRing'
+        ? (isWide ? 102 : 116) * timerScale
+        : template.timerStyle === 'pillCountdown'
+          ? (isWide ? 74 : 84) * timerScale
+          : template.timerStyle === 'bar'
+            ? 74 * timerScale
+            : (isWide ? 80 : 92) * timerScale;
+
+  let timerFitScale = 1;
+  let timerBoxW = rawTimerBoxW;
+  let timerBoxH = rawTimerBoxH;
+
+  let verticalCenterGap = effectiveRowGap;
+  const isCenteredVerticalSplit =
+    hasTimerEnabled &&
+    timerPlacement === 'centerOfOptions' &&
+    !is2x2Layout &&
+    optionCount >= 2;
+  const verticalSplitIdx = isTrueFalse ? 0 : 1;
+
+  if (hasTimerEnabled && timerPlacement === 'centerOfOptions') {
+    if (!is2x2Layout) {
+      verticalCenterGap = Math.max(effectiveRowGap, timerBoxH + optTop + optBottom + 18 + extraCenterSpread * 0.4);
+    } else {
+      // Ensure centered timer fits strictly inside horizontal column corridor without clipping option cards
+      const minNeededColGap = timerBoxW + optSide * 2 + 22 + extraCenterSpread * 0.4;
+      if (!isFreeLayout && totalOptionsW - minNeededColGap < 2 * 145) {
+        totalOptionsW = Math.min(maxStageOptW, Math.max(totalOptionsW, 2 * 145 + minNeededColGap));
+        const maxPossibleGap = Math.max(40, totalOptionsW - 2 * 145);
+        if (minNeededColGap > maxPossibleGap) {
+          timerFitScale = Math.max(
+            0.58,
+            (maxPossibleGap - optSide * 2 - 20) / Math.max(1, rawTimerBoxW)
+          );
+          timerBoxW = rawTimerBoxW * timerFitScale;
+          timerBoxH = rawTimerBoxH * timerFitScale;
+        }
+      }
+      const reqGap = timerBoxW + optSide * 2 + 20 + extraCenterSpread * 0.4;
+      effectiveColGap = isFreeLayout
+        ? Math.min(Math.max(40, totalOptionsW - 2 * 140), Math.max(customColGap > 0 ? customColGap : userGap, reqGap))
+        : Math.min(Math.max(40, totalOptionsW - 2 * 145), Math.max(effectiveColGap, reqGap));
+
+      if (!isTrueFalse) {
+        effectiveRowGap = Math.max(
+          effectiveRowGap,
+          timerBoxH + optTop + optBottom + 18 + extraCenterSpread * 0.4
+        );
+      }
+    }
+  }
+
+  // Measure Explanation Note
+  const expTextTrimmed = (slide.explanationText || '').trim();
+  const hasExplanation = Boolean(template.showExplanationOnReveal && expTextTrimmed);
+  let expBoxW = Math.min(W - 120, Math.max(720, (template.optionsWidth / 100) * W));
+  let expFontSize = 30;
+  let expBoxH = 0;
+  let expLines: string[] = [];
+  const expHasMath = hasExplanation && hasMathSyntax(expTextTrimmed);
+  const measureExplanation = (fSz: number) => {
+    if (!hasExplanation) return;
+    if (isWide && !isFreeLayout) {
+      expBoxW = Math.min(wideAvailW, expBoxW);
+    } else if (!isFreeLayout) {
+      expBoxW = Math.min(W - 72, expBoxW);
+    }
+    const maxW = expBoxW - 48;
+    if (expHasMath) {
+      const mH = measureSmartQuizTextHeight(ctx, expTextTrimmed, maxW, fSz, fontStack, 700, 2);
+      expBoxH = Math.max(72, mH + 30);
+    } else {
+      ctx.font = `700 ${fSz}px ${fontStack}`;
+      ctx.direction = 'rtl';
+      expLines = wrapArabicText(ctx, expTextTrimmed, maxW).slice(0, 2);
+      expBoxH = expLines.length * (fSz + 10) + 28;
+    }
+  };
+  measureExplanation(expFontSize);
+
+  let timerGapTop = hasTimerEnabled && timerPlacement === 'aboveOptions' ? 16 : 0;
+  let timerGapBottom = hasTimerEnabled && timerPlacement === 'aboveOptions' ? 16 : 0;
+  let reserveFreeTimerSlot = false;
+  const getQAndImgBottomOuter = () =>
+    Math.max(
+      resolvedQCenterY + qH / 2 + qBottom,
+      hasSlideImg && isWide ? resolvedQCenterY + imgFrameH / 2 + imgOuterPad : 0
+    );
+  const computeMinGapQToOptions = () =>
+    ((hasTimerEnabled && (timerPlacement === 'aboveOptions' || reserveFreeTimerSlot))
+      ? timerGapTop + timerBoxH + timerGapBottom + optTop
+      : Math.max(20, optTop + 14)) + extraQGap;
+
+  let bottomMargin = isWide ? 24 : 88;
+  if (brandRect && hasBottomCornerBrand && !isFreeLayout) {
+    const widestBottomSpan = Math.max(totalOptionsW, hasExplanation ? expBoxW : 0);
+    const leftEdge = W / 2 - widestBottomSpan / 2;
+    const rightEdge = W / 2 + widestBottomSpan / 2;
+    if (leftEdge < brandRect.outerX + brandRect.outerW + 10 && rightEdge > brandRect.outerX - 10) {
+      bottomMargin = Math.max(bottomMargin, H - brandRect.outerY + 16);
+    }
+  }
+
+  let expReserveGap = 16;
+  let belowTimerGap = 16;
+  const computeBottomSafeLimit = () => {
+    const expReserve = hasExplanation ? expBoxH + expReserveGap + 8 : 0;
+    const belowReserve =
+      hasTimerEnabled && timerPlacement === 'belowOptions'
+        ? optBottom + belowTimerGap + timerBoxH + 14
+        : optBottom + 8;
+    return H - bottomMargin - expReserve - belowReserve;
+  };
+
+  let bottomSafeLimit = computeBottomSafeLimit();
+  const calcOptionsTotalH = (optH: number, rGap: number, vCenterGap: number) =>
+    isCenteredVerticalSplit
+      ? rowsCount * optH + Math.max(0, rowsCount - 2) * rGap + vCenterGap
+      : rowsCount * optH + Math.max(0, rowsCount - 1) * rGap;
+
+  let optionsTotalH = calcOptionsTotalH(effectiveOptH, effectiveRowGap, verticalCenterGap);
+  const desiredOptionsStartPx =
+    isWide && !isFreeLayout
+      ? Math.max(H * 0.42, Math.min(H * 0.65, (template.optionsStartY / 100) * H * 0.98))
+      : (template.optionsStartY / 100) * H;
+
+  let qBottomPx = getQAndImgBottomOuter();
+  let minOptionsStartPx = qBottomPx + computeMinGapQToOptions();
+
+  // === Strict Progressive Fit Cascade (guarantees ZERO layer overlap across extreme settings) ===
+  const runFitCascade = () => {
+    if (isFreeLayout) return;
+    const syncTopAndOptions = () => {
+      qBottomPx = getQAndImgBottomOuter();
+      minOptionsStartPx = qBottomPx + computeMinGapQToOptions();
+      bottomSafeLimit = computeBottomSafeLimit();
+      optionsTotalH = calcOptionsTotalH(effectiveOptH, effectiveRowGap, verticalCenterGap);
+    };
+    syncTopAndOptions();
+
+    // Pass 1: Pull Question up toward contentTopFloor + Image
+    if (minOptionsStartPx + optionsTotalH > bottomSafeLimit) {
+      const excess = minOptionsStartPx + optionsTotalH - bottomSafeLimit;
+      const pullQUp = Math.min(excess, Math.max(0, resolvedQCenterY - minQCenterY));
+      resolvedQCenterY -= pullQUp;
+      syncTopAndOptions();
+    }
+
+    // Pass 2: Trim extra user padding & inter-layer gaps cleanly
+    if (minOptionsStartPx + optionsTotalH > bottomSafeLimit) {
+      extraQGap = 0;
+      timerGapTop = hasTimerEnabled && (timerPlacement === 'aboveOptions' || reserveFreeTimerSlot) ? 10 : 0;
+      timerGapBottom = hasTimerEnabled && (timerPlacement === 'aboveOptions' || reserveFreeTimerSlot) ? 10 : 0;
+      imgToQGap = hasSlideImg && !isWide ? minImgToQGap : 0;
+      if (badgeData) {
+        contentTopFloor = badgeData.centerY + (badgeData.boxH * badgeData.scale) / 2 + 10;
+      }
+      minQCenterY = computeMinQCenterY();
+      resolvedQCenterY = Math.max(minQCenterY, Math.min(resolvedQCenterY, minQCenterY));
+      syncTopAndOptions();
+    }
+
+    // Pass 3: Shrink Slide Image frame cleanly if present (9:16 & 16:9)
+    if (minOptionsStartPx + optionsTotalH > bottomSafeLimit && hasSlideImg && imgFrameH > 120) {
+      const excess = minOptionsStartPx + optionsTotalH - bottomSafeLimit;
+      const targetImgH = Math.max(115, imgFrameH - (isWide ? excess * 1.4 : excess));
+      sizeImgFrame(targetImgH);
+      minQCenterY = computeMinQCenterY();
+      resolvedQCenterY = Math.max(minQCenterY, resolvedQCenterY - (isWide ? excess * 0.5 : 0));
+      syncTopAndOptions();
+    }
+
+    // Pass 4: Compact Question box height & font size cleanly if Question still hogs height
+    if (minOptionsStartPx + optionsTotalH > bottomSafeLimit) {
+      minChannelQH = 0;
+      qPadY = isWide ? 16 : 14;
+      qMetrics = measureQuestionBlock(qFontSize, qPadY, 0);
+      while (
+        qFontSize > 26 &&
+        qMetrics.totalH + qBottom + computeMinGapQToOptions() + optionsTotalH >
+          bottomSafeLimit - (minQCenterY - qMetrics.totalH / 2)
+      ) {
+        qFontSize -= 3;
+        qMetrics = measureQuestionBlock(qFontSize, qPadY, 0);
+      }
+      qLineHeight = qMetrics.lH;
+      qLines = qMetrics.lines;
+      qH = qMetrics.totalH;
+      minQCenterY = computeMinQCenterY();
+      resolvedQCenterY = minQCenterY;
+      syncTopAndOptions();
+    }
+
+    // Pass 5: Compact non-center row gaps, explanation padding & option heights so optionsBottomPx <= bottomSafeLimit ALWAYS
+    if (minOptionsStartPx + optionsTotalH > bottomSafeLimit) {
+      if (hasExplanation && expFontSize > 24) {
+        expFontSize = 24;
+        expReserveGap = 10;
+        measureExplanation(24);
+      }
+      const minNeededCenterRowGap =
+        hasTimerEnabled && timerPlacement === 'centerOfOptions' && !isCenteredVerticalSplit && !isTrueFalse
+          ? timerBoxH + optTop + optBottom + 20
+          : minVisualRowGap;
+      effectiveRowGap = Math.max(minNeededCenterRowGap, Math.min(effectiveRowGap, isWide ? 14 : 20));
+      verticalCenterGap = isCenteredVerticalSplit
+        ? Math.max(timerBoxH + optTop + optBottom + 20, Math.min(verticalCenterGap, timerBoxH + optTop + optBottom + 26))
+        : effectiveRowGap;
+
+      const computeGapTotal = () =>
+        isCenteredVerticalSplit
+          ? Math.max(0, rowsCount - 2) * effectiveRowGap + verticalCenterGap
+          : Math.max(0, rowsCount - 1) * effectiveRowGap;
+
+      syncTopAndOptions();
+      let availH = bottomSafeLimit - minOptionsStartPx;
+      let gapTotalH = computeGapTotal();
+      if (availH - gapTotalH < rowsCount * 46 && hasTimerEnabled && timerFitScale > 0.56) {
+        timerFitScale = Math.max(0.55, timerFitScale * 0.72);
+        timerBoxW = rawTimerBoxW * timerFitScale;
+        timerBoxH = rawTimerBoxH * timerFitScale;
+        if (hasTimerEnabled && timerPlacement === 'centerOfOptions') {
+          if (isCenteredVerticalSplit) {
+            verticalCenterGap = Math.max(minVisualRowGap, timerBoxH + optTop + optBottom + 20);
+          } else if (!isTrueFalse) {
+            effectiveRowGap = Math.max(minVisualRowGap, timerBoxH + optTop + optBottom + 20);
+          }
+        }
+        syncTopAndOptions();
+        availH = bottomSafeLimit - minOptionsStartPx;
+        gapTotalH = computeGapTotal();
+      }
+
+      const maxOptH = Math.floor((availH - gapTotalH) / Math.max(1, rowsCount));
+      effectiveOptH = Math.max(36, Math.min(effectiveOptH, maxOptH));
+      optionsTotalH = calcOptionsTotalH(effectiveOptH, effectiveRowGap, verticalCenterGap);
+    }
+  };
+
+  runFitCascade();
+
+  let maxAllowedOptionsStart = Math.max(minOptionsStartPx, bottomSafeLimit - optionsTotalH);
+  let optionsStartPx = isFreeLayout
+    ? desiredOptionsStartPx
+    : Math.max(minOptionsStartPx, Math.min(desiredOptionsStartPx, maxAllowedOptionsStart));
+  let optionsBottomPx = optionsStartPx + optionsTotalH;
+
+  // === Horizontal Centers ===
+  let qCenterX: number;
+  if (isWide && !isFreeLayout) {
+    if (hasSlideImg) {
+      const wideImgCenterX = wideLeftBound + imgFrameW / 2 + 12;
+      const wideQLeftBound = wideImgCenterX + imgFrameW / 2 + 32;
+      qCenterX =
+        (template.questionX ?? 50) === 50
+          ? (wideQLeftBound + wideRightBound) / 2
+          : Math.max(
+              wideQLeftBound + qW / 2,
+              Math.min(wideRightBound - qW / 2, ((template.questionX ?? 50) / 100) * W + shiftForWideLadder)
+            );
+    } else {
+      qCenterX =
+        (template.questionX ?? 50) === 50
+          ? wideCenterX
+          : Math.max(
+              wideLeftBound + qW / 2,
+              Math.min(wideRightBound - qW / 2, ((template.questionX ?? 50) / 100) * W + shiftForWideLadder)
+            );
+    }
+  } else {
+    const rawQX = ((template.questionX ?? 50) / 100) * W + shiftForWideLadder;
+    const minMargin = qSide + wingReserve / 2 + 10;
+    qCenterX = isFreeLayout
+      ? rawQX
+      : Math.max(qW / 2 + minMargin, Math.min(W - qW / 2 - minMargin, rawQX));
+  }
+
+  const optionsAreaCenterX =
+    isWide && !isFreeLayout
+      ? (template.optionsX ?? 50) === 50
+        ? wideCenterX
+        : Math.max(
+            wideLeftBound + totalOptionsW / 2,
+            Math.min(wideRightBound - totalOptionsW / 2, ((template.optionsX ?? 50) / 100) * W + shiftForWideLadder)
+          )
+      : isFreeLayout
+        ? ((template.optionsX ?? 50) / 100) * W + shiftForWideLadder
+        : Math.max(
+            totalOptionsW / 2 + optSide + 10,
+            Math.min(W - totalOptionsW / 2 - optSide - 10, ((template.optionsX ?? 50) / 100) * W + shiftForWideLadder)
+          );
+
+  // Build Option Item Boxes + Image + Question + Explanation helpers so free-timer scan can also re-pack if stage is 100% full
+  const rtlCols = template.optionsRtlColumns !== false;
+  let optionItems: StageLayerLayout['options']['items'] = [];
+  let questionRect!: StageLayerLayout['question'];
+  let imageData: StageLayerLayout['image'];
+  let explanationData: StageLayerLayout['explanation'];
+
+  const rebuildStageBoxes = () => {
+    optionItems = [];
+    for (let i = 0; i < optionCount; i++) {
+      let boxW = totalOptionsW;
+      const boxH = effectiveOptH;
+      let centerX = optionsAreaCenterX;
+      let centerY = optionsStartPx + i * (boxH + effectiveRowGap) + boxH / 2;
+      if (isCenteredVerticalSplit && i > verticalSplitIdx) {
+        centerY += verticalCenterGap - effectiveRowGap;
+      }
+
+      if (is2x2Layout) {
+        if (isTrueFalse) {
+          const tfW = Math.min(totalOptionsW, Math.round(W * 0.94));
+          const tfGap = Math.max(customColGap > 0 || isFreeLayout ? 0 : minVisualColGap, effectiveColGap);
+          boxW = (tfW - tfGap) / 2;
+          const areaLeft = optionsAreaCenterX - tfW / 2;
+          const isRightCol = rtlCols ? i === 0 : i === 1;
+          centerX = isRightCol ? areaLeft + boxW + tfGap + boxW / 2 : areaLeft + boxW / 2;
+          centerY = optionsStartPx + boxH / 2;
+        } else {
+          const colGap = Math.max(customColGap > 0 || isFreeLayout ? 0 : minVisualColGap, effectiveColGap);
+          boxW = (totalOptionsW - colGap) / 2;
+          const row = Math.floor(i / 2);
+          const col = i % 2;
+          const isRightCol = rtlCols ? col === 0 : col === 1;
+          const areaLeft = optionsAreaCenterX - totalOptionsW / 2;
+          centerX = isRightCol ? areaLeft + boxW + colGap + boxW / 2 : areaLeft + boxW / 2;
+          centerY = optionsStartPx + row * (boxH + effectiveRowGap) + boxH / 2;
+        }
+      }
+
+      optionItems.push({
+        ...makeLayerRect(centerX - boxW / 2, centerY - boxH / 2, boxW, boxH, optTop, optBottom, optSide, optSide),
+        centerX,
+        centerY,
+        boxW,
+        boxH,
+      });
+    }
+
+    questionRect = {
+      ...makeLayerRect(
+        qCenterX - qW / 2,
+        resolvedQCenterY - qH / 2,
+        qW,
+        qH,
+        qTop,
+        qBottom,
+        qSide + wingReserve / 2,
+        qSide + wingReserve / 2
+      ),
+      centerX: qCenterX,
+      centerY: resolvedQCenterY,
+      w: qW,
+      h: qH,
+      fontSize: qFontSize,
+      lines: qLines,
+      lineHeight: qLineHeight,
+      hasMath: qHasMath,
+      padX: qPadX,
+      padY: qPadY,
+      rawText: qRawText,
+    };
+
+    imageData = undefined;
+    if (hasSlideImg && imgFrameW > 0 && imgFrameH > 0) {
+      const imgCX = isWide ? wideLeftBound + imgFrameW / 2 + 12 : qCenterX;
+      const imgCY = isWide
+        ? resolvedQCenterY
+        : resolvedQCenterY - qH / 2 - Math.max(minImgToQGap, imgToQGap) - imgFrameH / 2;
+      imageData = {
+        ...makeLayerRect(
+          imgCX - imgFrameW / 2,
+          imgCY - imgFrameH / 2,
+          imgFrameW,
+          imgFrameH,
+          imgOuterPad,
+          imgOuterPad,
+          imgOuterPad,
+          imgOuterPad
+        ),
+        centerX: imgCX,
+        centerY: imgCY,
+        frameW: imgFrameW,
+        frameH: imgFrameH,
+      };
+    }
+  };
+  rebuildStageBoxes();
+
+  // === Timer Layer Position ===
+  let resolvedTimerCenterX = optionsAreaCenterX;
+  let resolvedTimerCenterY = (qBottomPx + optionsStartPx) / 2;
+
+  const computeFixedTimerPos = () => {
+    if (timerPlacement === 'aboveOptions') {
+      const timerZoneTop = questionRect.outerY + questionRect.outerH + timerGapTop + timerBoxH / 2;
+      const timerZoneBottom = optionsStartPx - optTop - timerGapBottom - timerBoxH / 2;
+      const timerMidpoint = (questionRect.outerY + questionRect.outerH + optionsStartPx - optTop) / 2;
+      const desiredTimerY = (template.timerY / 100) * H;
+      resolvedTimerCenterX =
+        isWide && !isFreeLayout && (template.timerX ?? 50) === 50
+          ? wideCenterX
+          : ((template.timerX ?? 50) / 100) * W + shiftForWideLadder;
+      resolvedTimerCenterY = isFreeLayout
+        ? desiredTimerY
+        : timerZoneBottom >= timerZoneTop
+          ? Math.max(timerZoneTop, Math.min(timerZoneBottom, desiredTimerY))
+          : timerMidpoint;
+    } else if (timerPlacement === 'centerOfOptions') {
+      resolvedTimerCenterX = optionsAreaCenterX;
+      if (isCenteredVerticalSplit) {
+        const topGroupRows = verticalSplitIdx + 1;
+        const topGroupEnd =
+          optionsStartPx + topGroupRows * effectiveOptH + (topGroupRows - 1) * effectiveRowGap;
+        resolvedTimerCenterY = topGroupEnd + verticalCenterGap / 2;
+      } else if (isTrueFalse) {
+        resolvedTimerCenterY = optionsStartPx + effectiveOptH / 2;
+      } else {
+        resolvedTimerCenterY = optionsStartPx + effectiveOptH + effectiveRowGap / 2;
+      }
+    } else if (timerPlacement === 'belowOptions') {
+      resolvedTimerCenterX = optionsAreaCenterX;
+      resolvedTimerCenterY = optionsBottomPx + optBottom + belowTimerGap + timerBoxH / 2;
+    } else if (timerPlacement === 'free') {
+      const rawX = ((template.timerX ?? 50) / 100) * W;
+      const rawY = (template.timerY / 100) * H;
+      resolvedTimerCenterX = isFreeLayout
+        ? rawX
+        : Math.max(
+            (isWide ? wideLeftBound : 24) + timerBoxW / 2,
+            Math.min((isWide ? wideRightBound : W - 24) - timerBoxW / 2, rawX)
+          );
+      resolvedTimerCenterY = isFreeLayout
+        ? rawY
+        : Math.max(
+            topSafeFloor + timerBoxH / 2 + 6,
+            Math.min(H - bottomMargin - timerBoxH / 2 - 6, rawY)
+          );
+    }
+  };
+  computeFixedTimerPos();
+
+  const rebuildExplanation = () => {
+    explanationData = undefined;
+    if (!hasExplanation) return;
+    const expOffsetY = template.explanationOffsetY ?? 0;
+    const expMinTop =
+      hasTimerEnabled && timerPlacement === 'belowOptions'
+        ? resolvedTimerCenterY + timerBoxH / 2 + expReserveGap
+        : optionsBottomPx + optBottom + expReserveGap;
+    const maxExpBottom = H - bottomMargin;
+    const rawExpTop = expMinTop + expOffsetY;
+    const expTop = isFreeLayout
+      ? rawExpTop
+      : Math.max(expMinTop, Math.min(maxExpBottom - expBoxH, rawExpTop));
+    const expCX = optionsAreaCenterX;
+    const expCY = expTop + expBoxH / 2;
+
+    explanationData = {
+      ...makeLayerRect(expCX - expBoxW / 2, expTop, expBoxW, expBoxH, 4, 4, 4, 4),
+      centerX: expCX,
+      centerY: expCY,
+      boxW: expBoxW,
+      boxH: expBoxH,
+      lines: expLines,
+      hasMath: expHasMath,
+      fontSize: expFontSize,
+      text: expTextTrimmed,
+    };
+  };
+  rebuildExplanation();
+
+  // If timerPlacement === 'free' and Layer Protection is ON (!isFreeLayout), scan for a 100% collision-free pocket
+  if (hasTimerEnabled && timerPlacement === 'free' && !isFreeLayout) {
+    const collectBlockers = (): StageLayerRect[] => [
+      ...(progressRect ? [progressRect] : []),
+      ...(diffPillRect ? [diffPillRect] : []),
+      ...(prizeLadderRect ? [prizeLadderRect] : []),
+      ...(brandRect ? [brandRect] : []),
+      ...(badgeData ? [badgeData] : []),
+      ...(imageData ? [imageData] : []),
+      questionRect,
+      ...optionItems,
+      ...(explanationData ? [explanationData] : []),
+    ];
+    const mkTimerRect = (cx: number, cy: number, bw: number, bh: number) =>
+      makeLayerRect(cx - bw / 2, cy - bh / 2, bw, bh, 4, 4, 4, 4);
+
+    const findBestPocket = (scaleTry: number): { x: number; y: number } | null => {
+      const bw = rawTimerBoxW * scaleTry;
+      const bh = rawTimerBoxH * scaleTry;
+      const blockers = collectBlockers();
+      const minX = (isWide ? wideLeftBound : 20) + bw / 2;
+      const maxX = (isWide ? wideRightBound : W - 20) - bw / 2;
+      const minY = topSafeFloor + bh / 2 + 4;
+      const maxY = H - bottomMargin - bh / 2 - 4;
+      if (maxX < minX || maxY < minY) return null;
+
+      const xGrid = [
+        Math.max(minX, Math.min(maxX, resolvedTimerCenterX)),
+        optionsAreaCenterX,
+        minX + 12,
+        maxX - 12,
+        (minX + optionsAreaCenterX) / 2,
+        (maxX + optionsAreaCenterX) / 2,
+      ];
+      const yAnchorList = [
+        resolvedTimerCenterY,
+        (questionRect.outerY + questionRect.outerH + optionsStartPx - optTop) / 2,
+        questionRect.outerY - bh / 2 - 12,
+        optionsBottomPx + optBottom + bh / 2 + 12,
+        ...(imageData ? [imageData.centerY] : []),
+      ];
+      for (let y = minY; y <= maxY; y += 28) {
+        yAnchorList.push(y);
+      }
+
+      let best: { x: number; y: number } | null = null;
+      let bestDist = Infinity;
+      for (const cy of yAnchorList) {
+        if (cy < minY || cy > maxY) continue;
+        for (const cx of xGrid) {
+          if (cx < minX || cx > maxX) continue;
+          const r = mkTimerRect(cx, cy, bw, bh);
+          if (!blockers.some((b) => rectsIntersect(r, b, 2))) {
+            const d = Math.hypot(cx - resolvedTimerCenterX, cy - resolvedTimerCenterY);
+            if (d < bestDist) {
+              bestDist = d;
+              best = { x: cx, y: cy };
+            }
+          }
+        }
+      }
+      return best;
+    };
+
+    const currRect = mkTimerRect(resolvedTimerCenterX, resolvedTimerCenterY, timerBoxW, timerBoxH);
+    const initialBlockers = collectBlockers();
+    if (
+      currRect.outerX < 0 ||
+      currRect.outerY < 0 ||
+      currRect.outerX + currRect.outerW > W ||
+      currRect.outerY + currRect.outerH > H ||
+      initialBlockers.some((b) => rectsIntersect(currRect, b, 2))
+    ) {
+      let chosen: { x: number; y: number } | null = null;
+      for (const sTry of [timerFitScale, timerFitScale * 0.85, timerFitScale * 0.7]) {
+        const cand = findBestPocket(sTry);
+        if (cand) {
+          timerFitScale = sTry;
+          timerBoxW = rawTimerBoxW * timerFitScale;
+          timerBoxH = rawTimerBoxH * timerFitScale;
+          chosen = cand;
+          break;
+        }
+      }
+      if (!chosen) {
+        // Canvas is completely packed: reserve an aboveOptions slot via the Progressive Fit Cascade so Timer has its own isolated band
+        timerFitScale = Math.min(timerFitScale, 0.75);
+        timerBoxW = rawTimerBoxW * timerFitScale;
+        timerBoxH = rawTimerBoxH * timerFitScale;
+        reserveFreeTimerSlot = true;
+        timerGapTop = 10;
+        timerGapBottom = 10;
+        runFitCascade();
+        maxAllowedOptionsStart = Math.max(minOptionsStartPx, bottomSafeLimit - optionsTotalH);
+        optionsStartPx = Math.max(minOptionsStartPx, Math.min(desiredOptionsStartPx, maxAllowedOptionsStart));
+        optionsBottomPx = optionsStartPx + optionsTotalH;
+        rebuildStageBoxes();
+        rebuildExplanation();
+        chosen = findBestPocket(timerFitScale) || {
+          x: optionsAreaCenterX,
+          y: (questionRect.outerY + questionRect.outerH + optionsStartPx - optTop) / 2,
+        };
+      }
+      resolvedTimerCenterX = chosen.x;
+      resolvedTimerCenterY = chosen.y;
+    }
+  }
+
+  const timerRect: StageLayerLayout['timer'] = {
+    ...makeLayerRect(
+      resolvedTimerCenterX - timerBoxW / 2,
+      resolvedTimerCenterY - timerBoxH / 2,
+      timerBoxW,
+      timerBoxH,
+      4,
+      4,
+      4,
+      4
+    ),
+    enabled: hasTimerEnabled,
+    placement: timerPlacement,
+    centerX: resolvedTimerCenterX,
+    centerY: resolvedTimerCenterY,
+    boxW: timerBoxW,
+    boxH: timerBoxH,
+    effectiveScale: timerScale * timerFitScale,
+    gapTop: timerGapTop,
+    gapBottom: timerGapBottom,
+  };
+
+  return {
+    W,
+    H,
+    isWide,
+    isFreeLayout,
+    wideLeftBound,
+    wideRightBound,
+    wideAvailW,
+    wideCenterX,
+    shiftForWideLadder,
+    topSafeFloor,
+    bottomMargin,
+    bottomSafeLimit,
+    protrusions: {
+      qTop,
+      qBottom,
+      qSide,
+      optTop,
+      optBottom,
+      optSide,
+    },
+    header: {
+      progress: progressRect,
+      diffPill: diffPillRect,
+      prizeLadder: prizeLadderRect,
+      brand: brandRect,
+    },
+    badge: badgeData,
+    image: imageData,
+    question: questionRect,
+    options: {
+      areaCenterX: optionsAreaCenterX,
+      startPx: optionsStartPx,
+      bottomPx: optionsBottomPx,
+      totalH: optionsTotalH,
+      totalW: totalOptionsW,
+      optH: effectiveOptH,
+      rowGap: effectiveRowGap,
+      colGap: effectiveColGap,
+      customColGap,
+      vertCenterGap: verticalCenterGap,
+      isCenteredVerticalSplit,
+      verticalSplitIdx,
+      items: optionItems,
+    },
+    timer: timerRect,
+    explanation: explanationData,
+  };
+}
+
 export function renderQuizFrame(
   ctx: CanvasRenderingContext2D,
   globalTime: number,
@@ -1382,10 +2934,13 @@ export function renderQuizFrame(
   template: TemplateSettings,
   timing: TimingSettings,
   audio: AudioSettings,
-  isPreview = false
+  isPreview = false,
+  interactiveState?: InteractiveStageState,
+  outHitboxes?: StageElementHitbox[]
 ): void {
   const { width: W, height: H } = getCanvasDimensions(template);
   const isWide = template.aspectRatio === '16:9';
+  const isFreeLayout = Boolean(template.freeLayoutMode);
   const fontStack = `'${template.fontFamily}', 'Cairo', 'Tajawal', sans-serif`;
 
   const boxStyle: BoxShapeStyle = template.boxStyle || 'flat';
@@ -1393,8 +2948,8 @@ export function renderQuizFrame(
   const shadowIntensity = template.shadowIntensity ?? 1;
   const glowIntensity = template.glowIntensity ?? 0;
   const globalScale = Math.max(0.75, Math.min(1.25, template.globalScale ?? 1));
-  const timerScale = Math.max(0.7, Math.min(1.4, template.timerScale ?? 1));
-  const badgeScale = Math.max(0.7, Math.min(1.4, template.badgeScale ?? 1));
+  const timerScale = Math.max(0.5, Math.min(1.8, template.timerScale ?? 1));
+  const badgeScale = Math.max(0.6, Math.min(1.8, template.badgeScale ?? 1));
 
   ctx.save();
   ctx.imageSmoothingEnabled = true;
@@ -1494,6 +3049,8 @@ export function renderQuizFrame(
       const ctaScale = 1 + 0.035 * Math.sin(endElapsed * 5);
       const ctaW = isWide ? 660 : 700;
       const ctaH = 78;
+      const ctaLabel =
+        (template.endCtaText || '').trim() || 'اشترك في القناة · اكتب نتيجتك في التعليقات';
       ctx.save();
       ctx.translate(W / 2, ctaY);
       ctx.scale(ctaScale, ctaScale);
@@ -1504,12 +3061,17 @@ export function renderQuizFrame(
       ctx.lineWidth = 3;
       ctx.stroke();
 
-      ctx.font = `800 ${isWide ? 32 : 34}px ${fontStack}`;
+      let ctaFont = isWide ? 32 : 34;
       ctx.direction = 'rtl';
+      ctx.font = `800 ${ctaFont}px ${fontStack}`;
+      while (ctaFont > 20 && ctx.measureText(ctaLabel).width > ctaW - 44) {
+        ctaFont -= 2;
+        ctx.font = `800 ${ctaFont}px ${fontStack}`;
+      }
       ctx.fillStyle = '#FFFFFF';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillText('اشترك في القناة · اكتب نتيجتك في التعليقات', 0, 2);
+      ctx.fillText(ctaLabel, 0, 2);
       ctx.restore();
     }
 
@@ -1549,13 +3111,19 @@ export function renderQuizFrame(
   // Slide-to-Slide Transition Envelope
   const slideTrans: SlideTransitionStyle = template.slideTransition || 'none';
   const hasNextSlide = slideIndex < slides.length - 1;
-  const gapDur = Math.max(0.01, timing.transitionGap || 0.35);
+  const rawGap = Math.max(0, timing.transitionGap || 0);
   let transOutProg = 0;
   if (slideTrans !== 'none' && hasNextSlide) {
-    if (globalTime >= schedule.endTime) {
-      transOutProg = clamp01((globalTime - schedule.endTime) / gapDur);
-    } else if (timing.transitionGap < 0.15 && localTime > schedule.duration - 0.24) {
-      transOutProg = clamp01((localTime - (schedule.duration - 0.24)) / 0.24);
+    if (rawGap >= 0.15) {
+      if (globalTime >= schedule.endTime) {
+        transOutProg = clamp01((globalTime - schedule.endTime) / rawGap);
+      }
+    } else {
+      const nextStart = schedule.endTime + rawGap;
+      const outWin = 0.24;
+      if (globalTime >= nextStart - outWin) {
+        transOutProg = clamp01((globalTime - (nextStart - outWin)) / outWin);
+      }
     }
   }
   const transInDur = 0.32;
@@ -1592,21 +3160,40 @@ export function renderQuizFrame(
     }
   }
 
-  // 2.5 Optional Slide Progress Counter & Bar
-  if (template.showProgressCounter && slides.length > 1) {
-    ctx.save();
-    const progW = isWide ? 320 : 280;
-    const progY = isWide ? 42 : 76;
+  const layout = computeStageLayerLayout(
+    ctx,
+    slide,
+    slides.length,
+    template,
+    timing,
+    slideImg ? { width: slideImg.naturalWidth, height: slideImg.naturalHeight } : null
+  );
+  const {
+    badge: layoutBadge,
+    image: layoutImage,
+    question: layoutQuestion,
+    options: layoutOptions,
+    timer: layoutTimer,
+    explanation: layoutExplanation,
+  } = layout;
+
+  // 2.5 Optional Slide Progress Counter & Bar (Layer 1A)
+  if (layout.header.progress && slides.length > 1) {
+    const pRect = layout.header.progress;
+    const progW = pRect.w;
+    const progX = pRect.x;
+    const progY = pRect.y + 18;
     const ratio = clamp01((slideIndex + 1) / slides.length);
 
-    drawRoundedRect(ctx, W / 2 - progW / 2, progY - 18, progW, 38, 12);
+    ctx.save();
+    drawRoundedRect(ctx, progX, pRect.y, progW, pRect.h, 12);
     ctx.fillStyle = darkBg ? 'rgba(11, 15, 23, 0.65)' : 'rgba(255, 255, 255, 0.85)';
     ctx.fill();
     ctx.strokeStyle = darkBg ? 'rgba(237, 214, 162, 0.35)' : 'rgba(18, 24, 38, 0.16)';
     ctx.lineWidth = 1.5;
     ctx.stroke();
 
-    ctx.font = `800 ${isWide ? 22 : 24}px ${fontStack}`;
+    ctx.font = `800 ${progW < 230 ? 19 : isWide ? 22 : 24}px ${fontStack}`;
     ctx.direction = 'rtl';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
@@ -1627,7 +3214,41 @@ export function renderQuizFrame(
     ctx.restore();
   }
 
-  // 2.6 Optional Millionaire Prize Ladder
+  // 2.55 Optional Per-Slide Difficulty Badge (Layer 1B)
+  const diffMode = slide.difficulty || 'none';
+  if (layout.header.diffPill && diffMode !== 'none') {
+    const diffCfg =
+      diffMode === 'easy'
+        ? { label: 'سهل', dot: '#22C55E', border: 'rgba(34, 197, 94, 0.6)' }
+        : diffMode === 'medium'
+          ? { label: 'متوسط', dot: '#F59E0B', border: 'rgba(245, 158, 11, 0.6)' }
+          : { label: 'صعب', dot: '#EF4444', border: 'rgba(239, 68, 68, 0.65)' };
+
+    const { x: pillX, y: pillY, w: pillW, h: pillH } = layout.header.diffPill;
+
+    ctx.save();
+    drawRoundedRect(ctx, pillX, pillY, pillW, pillH, 14);
+    ctx.fillStyle = darkBg ? 'rgba(11, 15, 23, 0.72)' : 'rgba(255, 255, 255, 0.9)';
+    ctx.fill();
+    ctx.strokeStyle = diffCfg.border;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.arc(pillX + pillW - 22, pillY + pillH / 2, 7, 0, Math.PI * 2);
+    ctx.fillStyle = diffCfg.dot;
+    ctx.fill();
+
+    ctx.font = `800 ${isWide ? 22 : 23}px ${fontStack}`;
+    ctx.direction = 'rtl';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = darkBg ? '#FFFFFF' : '#0F172A';
+    ctx.fillText(diffCfg.label, pillX + (pillW - 26) / 2, pillY + pillH / 2 + 1);
+    ctx.restore();
+  }
+
+  // 2.6 Optional Millionaire Prize Ladder (Layer 1C)
   if (template.showPrizeLadder) {
     drawPrizeLadder(
       ctx,
@@ -1638,17 +3259,13 @@ export function renderQuizFrame(
       revealElapsed,
       W,
       H,
-      fontStack
+      fontStack,
+      diffMode !== 'none'
     );
   }
 
   // Apply Global Scale around stage focal center
   const hasGlobalScale = Math.abs(globalScale - 1) > 0.005;
-  const shiftForWideLadder =
-    isWide && template.showPrizeLadder && (template.prizeLadderStyle || 'topStrip') === 'sideColumn'
-      ? 126
-      : 0;
-
   ctx.save();
   if (hasGlobalScale) {
     ctx.translate(W / 2, H * 0.52);
@@ -1656,144 +3273,55 @@ export function renderQuizFrame(
     ctx.translate(-W / 2, -H * 0.52);
   }
 
-  // 3. Optional Top Badge
-  const safeBadge = (slide.badgeText ?? '').trim();
-  if (template.showBadge && safeBadge) {
+  // 3. Layer 2: Optional Top Badge
+  if (layoutBadge) {
     const badgeProgress = clamp01((localTime - tQuestionStart) / animDuration);
     if (badgeProgress > 0) {
       const tr = computeAnimTransform(badgeProgress, 'fade');
       ctx.save();
       ctx.globalAlpha *= tr.opacity;
-      const badgeCenterY = isWide
-        ? Math.min(H * 0.14, (template.badgeY / 100) * H)
-        : (template.badgeY / 100) * H;
-      ctx.font = `700 ${isWide ? 34 : 32}px ${fontStack}`;
-      ctx.direction = 'rtl';
-      const textW = ctx.measureText(safeBadge).width;
-      const padX = 46;
-      const boxW = Math.min(W - 160, textW + padX * 2);
-      const boxH = 66;
-      const badgeCenterX = W / 2 + shiftForWideLadder + tr.offsetX;
-      const badgePosY = badgeCenterY + tr.offsetY;
+      ctx.translate(layoutBadge.centerX + tr.offsetX, layoutBadge.centerY + tr.offsetY);
+      ctx.scale(layoutBadge.scale, layoutBadge.scale);
 
-      ctx.translate(badgeCenterX, badgePosY);
-      ctx.scale(badgeScale, badgeScale);
-
-      drawRoundedRect(ctx, -boxW / 2, -boxH / 2, boxW, boxH, 33);
+      drawRoundedRect(
+        ctx,
+        -layoutBadge.boxW / 2,
+        -layoutBadge.boxH / 2,
+        layoutBadge.boxW,
+        layoutBadge.boxH,
+        template.badgeBorderRadius ?? 33
+      );
       ctx.fillStyle = template.badgeBgColor;
       ctx.fill();
 
+      ctx.font = `700 ${layoutBadge.font}px ${fontStack}`;
+      ctx.direction = 'rtl';
       ctx.fillStyle = template.badgeTextColor;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillText(safeBadge, 0, 2);
+      ctx.fillText(layoutBadge.text, 0, 2);
       ctx.restore();
     }
   }
 
-  // 4. Question Box (#q) + Optional Question Illustration Image
+  // 4. Layer 3 (Image) & Layer 4 (Question Box)
   const qProgress = clamp01((localTime - tQuestionStart) / animDuration);
   if (qProgress > 0) {
     const tr = computeAnimTransform(qProgress, template.questionAnim);
 
-    const userQW = (Math.max(40, Math.min(96, template.questionWidth || 68.6)) / 100) * W;
-    const qW = isWide
-      ? slideImg
-        ? Math.min(W * 0.64, userQW)
-        : Math.min(W - (shiftForWideLadder > 0 ? 340 : 120), userQW)
-      : userQW;
-
-    const qCenterY = isWide
-      ? Math.max(170, Math.min(H * 0.48, (template.questionY / 100) * H * 0.78))
-      : (template.questionY / 100) * H;
-
-    const padX = isWide ? 48 : 28;
-    const padY = isWide ? 28 : 24;
-    const qRawText = slide.question || 'اكتب نص السؤال هنا';
-    const qHasMath = hasMathSyntax(qRawText);
-
-    let qFontSize = isWide
-      ? Math.min(72, Math.max(46, Math.round(template.questionFontSize * 0.92)))
-      : template.questionFontSize;
-
-    if (isChannelLayout && !isWide) {
-      if (qRawText.length > 60) qFontSize = Math.round(qFontSize * 0.62);
-      else if (qRawText.length > 35) qFontSize = Math.round(qFontSize * 0.78);
-    } else if (isWide && qRawText.length > 75) {
-      qFontSize = Math.round(qFontSize * 0.8);
-    }
-
-    ctx.font = `800 ${qFontSize}px ${fontStack}`;
-    ctx.direction = 'rtl';
-    let lines = qHasMath ? [qRawText] : wrapArabicText(ctx, qRawText, qW - padX * 2);
-    if (!qHasMath && lines.length > 3 && qFontSize > 34) {
-      qFontSize = Math.max(34, Math.round(qFontSize * 0.82));
-      ctx.font = `800 ${qFontSize}px ${fontStack}`;
-      lines = wrapArabicText(ctx, qRawText, qW - padX * 2);
-    }
-
-    const lineHeight = qFontSize * (qHasMath ? 1.55 : 1.3);
-    const estLines = qHasMath
-      ? Math.min(3, Math.max(1, Math.ceil(qRawText.length / (isWide ? 42 : 24))))
-      : lines.length;
-    const textBlockH = Math.max(lineHeight, estLines * lineHeight);
-    const minChannelQH =
-      (template.questionHeightPct ?? 0) > 0
-        ? isWide
-          ? Math.round(H * 0.22)
-          : (template.questionHeightPct / 100) * H
-        : 0;
-    const qH = Math.max(minChannelQH, textBlockH + padY * 2);
-
-    const centerX =
-      (isWide && slideImg ? W * 0.61 : isChannelLayout && !isWide ? W * 0.502 : W / 2) +
-      shiftForWideLadder +
-      tr.offsetX;
-    const centerY = qCenterY + tr.offsetY;
-
-    // Optional Question Illustration Image
-    if (slideImg) {
+    // Layer 3: Optional Question Illustration Image
+    if (slideImg && layoutImage) {
+      const { frameW: imgFrameW, frameH: imgFrameH } = layoutImage;
       ctx.save();
       ctx.globalAlpha *= tr.opacity;
-      const imgAspect = slideImg.naturalWidth / Math.max(1, slideImg.naturalHeight);
-      let frameW = 360;
-      let frameH = 250;
-      let frameX = W / 2;
-      let frameY = qCenterY - qH / 2 - 155;
-
-      if (isWide) {
-        const maxBoxW = 380;
-        const maxBoxH = Math.max(210, qH + 16);
-        frameW = imgAspect >= 1 ? maxBoxW : Math.min(maxBoxW, maxBoxH * imgAspect);
-        frameH = frameW / imgAspect;
-        if (frameH > maxBoxH) {
-          frameH = maxBoxH;
-          frameW = frameH * imgAspect;
-        }
-        frameX = W * 0.165 + shiftForWideLadder + tr.offsetX;
-        frameY = qCenterY + tr.offsetY;
-      } else {
-        const maxTopY = template.showBadge && safeBadge ? 255 : 145;
-        const availH = Math.max(150, qCenterY - qH / 2 - maxTopY - 24);
-        const maxBoxW = 540;
-        const maxBoxH = Math.min(285, availH);
-        frameH = maxBoxH;
-        frameW = Math.min(maxBoxW, frameH * imgAspect);
-        if (frameW / imgAspect > maxBoxH) {
-          frameH = frameW / imgAspect;
-        }
-        frameX = W / 2 + tr.offsetX;
-        frameY = qCenterY - qH / 2 - 22 - frameH / 2 + tr.offsetY;
-      }
-
-      ctx.translate(frameX, frameY);
+      ctx.translate(layoutImage.centerX + tr.offsetX, layoutImage.centerY + tr.offsetY);
       ctx.scale(tr.scale, tr.scale);
-      drawRoundedRect(ctx, -frameW / 2 - 8, -frameH / 2 - 8, frameW + 16, frameH + 16, 28);
+      drawRoundedRect(ctx, -imgFrameW / 2 - 8, -imgFrameH / 2 - 8, imgFrameW + 16, imgFrameH + 16, 28);
       ctx.fillStyle = 'rgba(0, 0, 0, 0.32)';
       ctx.fill();
 
       ctx.save();
-      drawRoundedRect(ctx, -frameW / 2, -frameH / 2, frameW, frameH, 24);
+      drawRoundedRect(ctx, -imgFrameW / 2, -imgFrameH / 2, imgFrameW, imgFrameH, 24);
       ctx.clip();
 
       const imgMode = slide.imageChallengeMode || 'normal';
@@ -1829,17 +3357,17 @@ export function renderQuizFrame(
       drawBlurredChallengeImage(
         ctx,
         slideImg,
-        -frameW / 2,
-        -frameH / 2,
-        frameW,
-        frameH,
+        -imgFrameW / 2,
+        -imgFrameH / 2,
+        imgFrameW,
+        imgFrameH,
         activeBlur,
         mysteryAlpha,
         fontStack
       );
       ctx.restore();
 
-      drawRoundedRect(ctx, -frameW / 2, -frameH / 2, frameW, frameH, 24);
+      drawRoundedRect(ctx, -imgFrameW / 2, -imgFrameH / 2, imgFrameW, imgFrameH, 24);
       ctx.strokeStyle =
         imgMode !== 'normal' && isRevealed
           ? template.correctColor || '#00B050'
@@ -1849,9 +3377,21 @@ export function renderQuizFrame(
       ctx.restore();
     }
 
+    // Layer 4: Question Box
+    const {
+      w: qW,
+      h: qH,
+      fontSize: qFontSize,
+      lines: qLines,
+      lineHeight: qLineHeight,
+      hasMath: qHasMath,
+      padX: qPadX,
+      rawText: qRawText,
+    } = layoutQuestion;
+
     ctx.save();
     ctx.globalAlpha *= tr.opacity;
-    ctx.translate(centerX, centerY);
+    ctx.translate(layoutQuestion.centerX + tr.offsetX, layoutQuestion.centerY + tr.offsetY);
     ctx.scale(tr.scale, tr.scale);
 
     const hasQBody = template.questionBoxOpacity > 0.01;
@@ -1887,7 +3427,7 @@ export function renderQuizFrame(
           qRawText,
           0,
           2,
-          qW - padX * 2,
+          qW - qPadX * 2,
           qFontSize,
           fontStack,
           800,
@@ -1900,7 +3440,7 @@ export function renderQuizFrame(
         qRawText,
         0,
         0,
-        qW - padX * 2,
+        qW - qPadX * 2,
         qFontSize,
         fontStack,
         800,
@@ -1908,71 +3448,47 @@ export function renderQuizFrame(
         3
       );
     } else {
-      ctx.textAlign = 'center';
+      ctx.font = `800 ${qFontSize}px ${fontStack}`;
+      ctx.direction = 'rtl';
+      const qAlign = template.questionTextAlign || 'center';
+      ctx.textAlign = qAlign;
       ctx.textBaseline = 'middle';
-      const startLineY = -((lines.length - 1) * lineHeight) / 2;
+      const qTextDrawX =
+        qAlign === 'right'
+          ? qW / 2 - qPadX
+          : qAlign === 'left'
+            ? -qW / 2 + qPadX
+            : 0;
+      const startLineY = -((qLines.length - 1) * qLineHeight) / 2;
       if (enhanced) {
         ctx.fillStyle = isColorDark(template.questionBoxColor)
           ? 'rgba(0,0,0,0.35)'
           : 'rgba(255,255,255,0.3)';
-        lines.forEach((line, idx) => {
-          ctx.fillText(line, 0, startLineY + idx * lineHeight + 2);
+        qLines.forEach((line, idx) => {
+          ctx.fillText(line, qTextDrawX, startLineY + idx * qLineHeight + 2);
         });
       }
       ctx.fillStyle = template.questionTextColor;
-      lines.forEach((line, idx) => {
-        ctx.fillText(line, 0, startLineY + idx * lineHeight);
+      qLines.forEach((line, idx) => {
+        ctx.fillText(line, qTextDrawX, startLineY + idx * qLineHeight);
       });
     }
 
     ctx.restore();
   }
 
-  // 5. Four Options
+  // 5. Layer 5: Options Grid / List
+  const optionCount = layoutOptions.items.length;
+  const effectiveOptH = layoutOptions.optH;
   const isSuspending =
     localTime >= tSuspenseStart && localTime < tRevealStart && timing.suspenseDuration > 0;
   const revealAnim = isRevealed ? easeOutBack(clamp01(revealElapsed / 0.35)) : 0;
   const revealFade = isRevealed ? clamp01(revealElapsed / 0.25) : 0;
 
-  const userOptAreaW = (Math.max(50, Math.min(100, template.optionsWidth ?? 100)) / 100) * W;
-  const totalOptionsW = isWide
-    ? Math.min(W - (shiftForWideLadder > 0 ? 340 : 100), userOptAreaW)
-    : userOptAreaW;
-
-  const optionsStartPx = isWide
-    ? Math.max(H * 0.34, Math.min(H * 0.72, (template.optionsStartY / 100) * H * 0.94))
-    : (template.optionsStartY / 100) * H;
-
-  const optionCount = isTrueFalse ? 2 : 4;
-  const rowsCount = template.optionsLayout === 'vertical' ? (isTrueFalse ? 2 : 4) : isTrueFalse ? 1 : 2;
-  const baseOptH = isWide
-    ? template.optionsLayout === 'vertical'
-      ? Math.min(126, Math.max(80, Math.round(template.optionHeight * 0.78)))
-      : Math.min(168, Math.max(96, template.optionHeight))
-    : template.optionHeight;
-  const effectiveOptH = isTrueFalse && template.optionsLayout !== 'vertical'
-    ? Math.max(baseOptH, isWide ? 164 : 184)
-    : baseOptH;
-
-  const userGap = Math.max(6, template.optionsGap ?? 28);
-  const effectiveRowGap = isChannelLayout
-    ? isWide
-      ? Math.max(16, userGap + 20)
-      : template.timerStyle === 'channelBox'
-        ? Math.max(12, userGap + 39)
-        : userGap
-    : isWide
-      ? Math.min(48, userGap)
-      : userGap;
-
-  const optionsBottomPx =
-    optionsStartPx + rowsCount * effectiveOptH + Math.max(0, rowsCount - 1) * effectiveRowGap;
-
   const wrongColor = template.wrongColor || '#DC2626';
   const isRedWrongMode = template.revealStyle === 'redWrongGreenCorrect';
-  const rtlCols = template.optionsRtlColumns !== false;
-  let correctOriginX = W / 2;
-  let correctOriginY = optionsStartPx + effectiveOptH;
+  let correctOriginX = layoutOptions.areaCenterX;
+  let correctOriginY = layoutOptions.startPx + effectiveOptH;
 
   for (let i = 0; i < optionCount; i++) {
     const optProgress = clamp01((localTime - tOptionStarts[i]) / animDuration);
@@ -1982,63 +3498,20 @@ export function renderQuizFrame(
     const isCorrect = i === slide.correctIndex;
     const isWrongRed = isRevealed && !isCorrect && isRedWrongMode;
 
-    const optWindowEnd = i < optionCount - 1 ? tOptionStarts[i + 1] : tThinkingStart;
+    let optWindowEnd = tThinkingStart;
+    for (let k = i + 1; k < optionCount; k++) {
+      if (tOptionStarts[k] > tOptionStarts[i] + 0.01) {
+        optWindowEnd = tOptionStarts[k];
+        break;
+      }
+    }
     const isSpokenHighlight =
       Boolean(template.highlightSpokenOption) &&
       !isRevealed &&
       localTime >= tOptionStarts[i] &&
       localTime < optWindowEnd;
 
-    let boxW = totalOptionsW;
-    const boxH = effectiveOptH;
-    let centerX = W / 2 + shiftForWideLadder;
-    let centerY = optionsStartPx + i * (boxH + effectiveRowGap) + boxH / 2;
-
-    if (template.optionsLayout === 'channel2x2') {
-      if (isWide) {
-        // Widescreen 16:9 2x2 with central timer clearance & full width/gap freedom
-        const wideColGap = Math.max(
-          20,
-          userGap + (template.timerStyle === 'channelBox' && !isTrueFalse ? 120 : 12)
-        );
-        boxW = (totalOptionsW - wideColGap) / 2;
-        const row = Math.floor(i / 2);
-        const col = i % 2;
-        const isRightCol = rtlCols ? col === 0 : col === 1;
-        const areaLeft = (W - totalOptionsW) / 2 + shiftForWideLadder;
-        centerX = isRightCol
-          ? areaLeft + boxW + wideColGap + boxW / 2
-          : areaLeft + boxW / 2;
-        centerY = optionsStartPx + row * (boxH + effectiveRowGap) + boxH / 2;
-      } else if (isTrueFalse) {
-        const tfW = Math.min(totalOptionsW, Math.round(W * 0.94));
-        const tfGap = Math.max(16, userGap);
-        boxW = (tfW - tfGap) / 2;
-        const areaLeft = (W - tfW) / 2;
-        const isRightCol = rtlCols ? i === 0 : i === 1;
-        centerX = isRightCol ? areaLeft + boxW + tfGap + boxW / 2 : areaLeft + boxW / 2;
-        centerY = optionsStartPx + boxH / 2;
-      } else {
-        // Vertical 9:16 2x2 responsive to optionsWidth, optionsGap, and optionsRtlColumns
-        const colGap = Math.max(8, userGap);
-        boxW = (totalOptionsW - colGap) / 2;
-        const row = Math.floor(i / 2);
-        const col = i % 2;
-        const isRightCol = rtlCols ? col === 0 : col === 1;
-        const areaLeft = (W - totalOptionsW) / 2;
-        centerX = isRightCol ? areaLeft + boxW + colGap + boxW / 2 : areaLeft + boxW / 2;
-        centerY = optionsStartPx + row * (boxH + effectiveRowGap) + boxH / 2;
-      }
-    } else if (template.optionsLayout === 'grid2x2') {
-      const colGap = Math.max(8, userGap);
-      boxW = (totalOptionsW - colGap) / 2;
-      const row = Math.floor(i / 2);
-      const col = i % 2;
-      const isRightCol = rtlCols ? col === 0 : col === 1;
-      const areaLeft = (W - totalOptionsW) / 2 + shiftForWideLadder;
-      centerX = isRightCol ? areaLeft + boxW + colGap + boxW / 2 : areaLeft + boxW / 2;
-      centerY = optionsStartPx + row * (boxH + effectiveRowGap) + boxH / 2;
-    }
+    const { boxW, boxH, centerX, centerY } = layoutOptions.items[i];
 
     if (isCorrect) {
       correctOriginX = centerX + tr.offsetX;
@@ -2059,7 +3532,7 @@ export function renderQuizFrame(
 
     if (isRevealed) {
       if (isCorrect) {
-        finalScale *= 1 + (isChannelLayout ? 0.07 : 0.05) * clamp01(revealAnim);
+        finalScale *= 1 + (isChannelLayout ? 0.06 : 0.05) * clamp01(revealAnim);
       } else if (template.revealStyle === 'dimOthers') {
         finalAlpha *= 1 - 0.7 * clamp01(revealElapsed / 0.28);
       } else if (isRedWrongMode) {
@@ -2152,7 +3625,7 @@ export function renderQuizFrame(
         isHighlighted: isSpokenHighlight,
         shadowOffsetY: 8,
         drawFill: true,
-        drawBorder: template.optionBorderWidth > 0 || isSpokenHighlight,
+        drawBorder: template.optionBorderWidth > 0 || isSpokenHighlight || boxStyle === 'minimalOutline',
       });
     }
 
@@ -2165,7 +3638,7 @@ export function renderQuizFrame(
       : getOptionBadgeLabel(i, template.optionLabelStyle);
     const hasBadge = labelStr.length > 0;
     const badgeSize = Math.min(boxH - 26, 66);
-    const isHexStyle = boxStyle === 'millionaireHex';
+    const isHexStyle = boxStyle === 'millionaireHex' || boxStyle === 'chamfer';
     const badgeMarginRight = isHexStyle ? 38 : 24;
 
     if (hasBadge) {
@@ -2253,8 +3726,12 @@ export function renderQuizFrame(
     const optHasMath = hasMathSyntax(optText);
 
     let optFontSize = isWide
-      ? Math.min(54, Math.max(38, template.optionFontSize))
+      ? Math.min(50, Math.max(34, template.optionFontSize))
       : template.optionFontSize;
+
+    if (effectiveOptH < 105) {
+      optFontSize = Math.min(optFontSize, Math.round(effectiveOptH * 0.42));
+    }
 
     if (isTrueFalse) {
       optFontSize = Math.round(optFontSize * 1.15);
@@ -2263,7 +3740,10 @@ export function renderQuizFrame(
       else if (optText.length > 35) optFontSize = Math.round(optFontSize * 0.78);
     }
 
-    const textMaxW = boxW - (hasBadge ? rightReserve + iconReserve : showCheck ? 110 : 40);
+    const leftPad = showCheck || showCross ? iconReserve : isHexStyle ? 38 : 22;
+    const rightPad = hasBadge ? rightReserve : isHexStyle ? 38 : 22;
+    const textMaxW = Math.max(110, boxW - leftPad - rightPad);
+    const centerTextX = (leftPad - rightPad) / 2;
     const optColor =
       isRevealed && (isCorrect || isWrongRed) ? '#FFFFFF' : template.optionTextColor;
 
@@ -2271,9 +3751,9 @@ export function renderQuizFrame(
       drawSmartQuizText(
         ctx,
         optText,
-        hasBadge ? -(rightReserve - iconReserve) * 0.35 : 0,
+        centerTextX,
         0,
-        Math.max(120, textMaxW),
+        textMaxW,
         optFontSize,
         fontStack,
         700,
@@ -2285,40 +3765,65 @@ export function renderQuizFrame(
       ctx.direction = 'rtl';
       ctx.fillStyle = optColor;
 
-      const optLines = wrapArabicText(ctx, optText, Math.max(120, textMaxW));
+      const safeTextMaxW = textMaxW;
+      let optLines = wrapArabicText(ctx, optText, safeTextMaxW);
+      const maxVisibleLines = template.autoFitText && boxH >= 130 ? 3 : 2;
+      if (template.autoFitText) {
+        const availOptH = Math.max(36, boxH - 16);
+        while (
+          optFontSize > 20 &&
+          (optLines.length > maxVisibleLines ||
+            optLines.length * (optFontSize * 1.25) > availOptH)
+        ) {
+          optFontSize -= 2;
+          ctx.font = `${isTrueFalse ? 800 : 700} ${optFontSize}px ${fontStack}`;
+          optLines = wrapArabicText(ctx, optText, safeTextMaxW);
+        }
+      }
+      const renderedOptLines = optLines.slice(0, maxVisibleLines);
       const optLineH = optFontSize * 1.25;
-      const optStartY = -((optLines.length - 1) * optLineH) / 2;
+      const optStartY = -((renderedOptLines.length - 1) * optLineH) / 2;
 
       const alignMode = template.optionTextAlign || 'auto';
-      const useCenteredText =
+      const resolvedAlign: 'center' | 'right' | 'left' =
         alignMode === 'center'
-          ? true
+          ? 'center'
           : alignMode === 'right'
-            ? false
-            : ((isChannelLayout || template.optionsLayout === 'grid2x2') && !hasBadge) || isTrueFalse;
+            ? 'right'
+            : alignMode === 'left'
+              ? 'left'
+              : ((isChannelLayout || template.optionsLayout === 'grid2x2') && !hasBadge) || isTrueFalse
+                ? 'center'
+                : 'right';
 
-      if (useCenteredText) {
+      if (resolvedAlign === 'center') {
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        const centerTextX = hasBadge ? -(rightReserve - iconReserve) * 0.28 : 0;
         if (enhanced) {
           ctx.fillStyle =
             isRevealed || isColorDark(template.optionBoxColor)
               ? 'rgba(0,0,0,0.32)'
               : 'rgba(255,255,255,0.28)';
-          optLines.slice(0, 2).forEach((line, lIdx) => {
+          renderedOptLines.forEach((line, lIdx) => {
             ctx.fillText(line, centerTextX, optStartY + lIdx * optLineH + 2);
           });
         }
         ctx.fillStyle = optColor;
-        optLines.slice(0, 2).forEach((line, lIdx) => {
+        renderedOptLines.forEach((line, lIdx) => {
           ctx.fillText(line, centerTextX, optStartY + lIdx * optLineH);
+        });
+      } else if (resolvedAlign === 'left') {
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        const textLeftX = -boxW / 2 + leftPad;
+        renderedOptLines.forEach((line, lIdx) => {
+          ctx.fillText(line, textLeftX, optStartY + lIdx * optLineH);
         });
       } else {
         ctx.textAlign = 'right';
         ctx.textBaseline = 'middle';
-        const textRightX = boxW / 2 - rightReserve;
-        optLines.slice(0, 2).forEach((line, lIdx) => {
+        const textRightX = boxW / 2 - rightPad;
+        renderedOptLines.forEach((line, lIdx) => {
           ctx.fillText(line, textRightX, optStartY + lIdx * optLineH);
         });
       }
@@ -2327,17 +3832,36 @@ export function renderQuizFrame(
     ctx.restore();
   }
 
-  // 6. Countdown Timer (#tm)
+  // 6. Countdown Timer (#tm) — Enters after options (default), supports flexible placement & disappears cleanly before answer reveal
+  const timerVisMode: TimerVisibilityMode =
+    template.timerVisibilityMode || 'afterOptionsBeforeAnswer';
+  const enterStart =
+    timerVisMode === 'fromQuestion' ? tQuestionStart + 0.55 : tThinkingStart;
+  const susWindow = Math.max(0, tRevealStart - tTimerExitStart);
+
+  let timerExitStart = tRevealStart;
+  let timerExitEnd = tRevealStart;
+  if (timerVisMode !== 'untilReveal') {
+    if (susWindow >= 0.22) {
+      timerExitStart = tTimerExitStart;
+      timerExitEnd = Math.min(tRevealStart - 0.03, tTimerExitStart + 0.22);
+    } else {
+      timerExitStart = Math.max(enterStart + 0.1, tRevealStart - 0.2);
+      timerExitEnd = Math.max(timerExitStart + 0.05, tRevealStart - 0.02);
+    }
+  }
+
   const showTimer =
-    template.timerStyle !== 'none' &&
-    timing.thinkingDuration > 0 &&
-    localTime >= (template.timerStyle === 'channelBox' ? tQuestionStart + 0.55 : tThinkingStart) &&
-    localTime < tRevealStart;
+    layoutTimer.enabled && localTime >= enterStart && localTime < timerExitEnd;
 
   if (showTimer) {
     const isThinking = localTime >= tThinkingStart && localTime < tTimerExitStart;
-    const enterStart = template.timerStyle === 'channelBox' ? tQuestionStart + 0.55 : tThinkingStart;
     const enterProg = clamp01((localTime - enterStart) / 0.22);
+    const exitProg =
+      timerVisMode === 'untilReveal' || localTime <= timerExitStart
+        ? 0
+        : clamp01((localTime - timerExitStart) / Math.max(0.05, timerExitEnd - timerExitStart));
+    const visAlpha = easeOutCubic(enterProg) * (1 - easeOutCubic(exitProg));
 
     const elapsedThink = isThinking
       ? Math.min(timing.thinkingDuration, localTime - tThinkingStart)
@@ -2346,179 +3870,339 @@ export function renderQuizFrame(
         : timing.thinkingDuration;
     const remaining = Math.max(0, timing.thinkingDuration - elapsedThink);
     const ratio = clamp01(remaining / Math.max(0.01, timing.thinkingDuration));
+    const urgentThreshold = Math.max(1, Math.min(10, template.timerUrgentThreshold ?? 3));
+    const urgentColor = template.timerUrgentColor?.trim() || '#EF4444';
+    const isUrgent =
+      isThinking && remaining <= urgentThreshold && template.timerUrgentPulse !== false;
+    const urgentPulse = isUrgent
+      ? 1 + 0.055 * Math.pow(Math.max(0, Math.sin(elapsedThink * Math.PI * 2)), 2)
+      : 1;
 
-    let timerCenterX = W / 2 + shiftForWideLadder;
-    let timerCenterY = (template.timerY / 100) * H;
-
-    if (template.timerStyle === 'channelBox') {
-      if (isWide) {
-        timerCenterX = W * 0.5 + shiftForWideLadder;
-        timerCenterY = isTrueFalse
-          ? optionsStartPx + effectiveOptH + 100
-          : optionsStartPx + effectiveOptH + effectiveRowGap * 0.5;
-      } else if (isTrueFalse) {
-        timerCenterX = W * 0.5;
-        timerCenterY = optionsBottomPx + 108;
-      } else {
-        timerCenterX = 0.5025 * W;
-        timerCenterY = (template.timerY / 100) * H + 0.0015 * H;
-      }
-    } else if (isWide) {
-      timerCenterY = Math.min(H - 84, Math.max(H * 0.88, optionsBottomPx + 56));
-    } else if (!isChannelLayout && template.timerY >= 55) {
-      timerCenterY = Math.min(H - 360, Math.max(timerCenterY, optionsBottomPx + 96));
-    } else if (isTrueFalse) {
-      timerCenterY = Math.min(H - 360, Math.max(timerCenterY, optionsBottomPx + 108));
-    }
-
+    const timerOpacity = clamp01(template.timerOpacity ?? 1);
     ctx.save();
-    ctx.globalAlpha *= easeOutCubic(enterProg);
-    ctx.translate(timerCenterX, timerCenterY);
-    const s = (0.85 + 0.15 * easeOutCubic(enterProg)) * timerScale;
+    ctx.globalAlpha *= visAlpha * timerOpacity;
+    ctx.translate(layoutTimer.centerX, layoutTimer.centerY);
+    const s =
+      (0.84 + 0.16 * easeOutBack(enterProg)) *
+      (1 - 0.22 * exitProg) *
+      layoutTimer.effectiveScale *
+      urgentPulse;
     ctx.scale(s, s);
 
     const matchBg = template.timerMatchBackground !== false;
-    const darkBg = isBackgroundDark(template);
+    const timerBoxHex = matchBg
+      ? template.questionBoxColor || template.timerBgColor || '#F2E3BA'
+      : template.timerBgColor || '#F2E3BA';
     const rawTimerColor = (template.timerColor || '#000000').trim();
-    const effectiveTimerColor =
-      matchBg && darkBg && (rawTimerColor.toLowerCase() === '#000000' || rawTimerColor === '#000')
+    const effectiveTimerColor = matchBg
+      ? isColorDark(timerBoxHex) &&
+        (rawTimerColor.toLowerCase() === '#000000' || rawTimerColor === '#000')
         ? '#FFFFFF'
-        : !matchBg &&
-            isColorDark(template.timerBgColor || '#F2E3BA') &&
-            (rawTimerColor.toLowerCase() === '#000000' || rawTimerColor === '#000')
-          ? '#FFFFFF'
-          : rawTimerColor;
+        : !isColorDark(timerBoxHex) &&
+            (rawTimerColor.toLowerCase() === '#ffffff' || rawTimerColor === '#fff')
+          ? '#0f172a'
+          : rawTimerColor
+      : rawTimerColor;
+    const activeAccentColor = isUrgent ? urgentColor : effectiveTimerColor;
+    const customBorderColor = template.timerBorderColor?.trim();
+    const timerStrokeColor = isUrgent
+      ? urgentColor
+      : customBorderColor || template.questionBorderColor || '#FFFFFF';
+    const customBorderW = template.timerBorderWidth ?? -1;
+    const timerStrokeWidth =
+      customBorderW >= 0
+        ? customBorderW
+        : Math.max(3, Math.min(5, template.questionBorderWidth || 4));
+    const unitSuffix = template.timerUnitSuffix ?? '';
+
+    const secDisplay = isThinking
+      ? Math.max(1, Math.ceil(remaining))
+      : localTime < tThinkingStart
+        ? Math.max(1, Math.ceil(timing.thinkingDuration))
+        : 0;
+    const secLabel = `${secDisplay}${unitSuffix}`;
+    const secFrac = isThinking ? elapsedThink - Math.floor(elapsedThink) : 1;
+    const popScale = isThinking
+      ? 1 + 0.14 * (1 - easeOutCubic(Math.min(1, secFrac / 0.24)))
+      : 1;
 
     if (template.timerStyle === 'channelBox') {
-      const boxW = isWide ? 140 : 0.153 * W;
-      const boxH = isWide ? 140 : 0.093 * H;
+      const boxW = isWide ? 124 : 142;
+      const boxH = isWide ? 98 : 114;
 
-      if (!matchBg) {
-        drawRoundedRect(ctx, -boxW / 2, -boxH / 2, boxW, boxH, 24);
-        ctx.fillStyle = template.timerBgColor || '#F2E3BA';
-        ctx.fill();
+      drawStyledBoxContainer(ctx, {
+        x: -boxW / 2,
+        y: -boxH / 2,
+        w: boxW,
+        h: boxH,
+        radius: 26,
+        fillColorHex: timerBoxHex,
+        fillRgba: hexToRgba(timerBoxHex, matchBg ? 0.92 : 0.98),
+        opacity: matchBg ? 0.92 : 0.98,
+        borderColor: timerStrokeColor,
+        borderWidth: timerStrokeWidth,
+        boxStyle: boxStyle === 'millionaireHex' || boxStyle === 'ticket' ? 'bevel3d' : boxStyle,
+        borderStyle: isUrgent ? 'solid' : borderStyle,
+        boxGloss: template.boxGloss,
+        enhanced,
+        shadowIntensity: Math.min(1, shadowIntensity),
+        glowIntensity: isUrgent ? Math.max(0.45, glowIntensity) : glowIntensity,
+        isHighlighted: isUrgent,
+        shadowOffsetY: 6,
+        drawFill: true,
+        drawBorder: timerStrokeWidth > 0,
+      });
+
+      ctx.save();
+      if (!isThinking && localTime < tThinkingStart) {
+        ctx.globalAlpha *= 0.65;
       }
-
-      if (isThinking) {
-        const secDisplay = Math.max(1, Math.ceil(remaining));
-        const secFrac = elapsedThink - Math.floor(elapsedThink);
-        const popScale = 1 + 0.14 * (1 - easeOutCubic(Math.min(1, secFrac / 0.24)));
-
-        ctx.save();
-        ctx.scale(popScale, popScale);
-        ctx.font = `900 ${isWide ? 92 : 108}px ${fontStack}`;
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillStyle = darkBg ? 'rgba(0, 0, 0, 0.26)' : 'rgba(0, 0, 0, 0.12)';
-        ctx.fillText(String(secDisplay), 0, 8);
-        ctx.fillStyle = effectiveTimerColor;
-        ctx.fillText(String(secDisplay), 0, 4);
-        ctx.restore();
-      }
-    } else if (template.timerStyle === 'bar') {
-      const barW = totalOptionsW * 0.72;
-      const barH = 22;
-      const barX = -barW / 2;
-      const barY = -barH / 2 + 12;
-
-      drawRoundedRect(ctx, barX, barY, barW, barH, 11);
-      ctx.fillStyle = darkBg ? 'rgba(255, 255, 255, 0.16)' : 'rgba(0, 0, 0, 0.12)';
-      ctx.fill();
-
-      const fillW = Math.max(20, barW * ratio);
-      drawRoundedRect(ctx, barX + (barW - fillW), barY, fillW, barH, 11);
-      ctx.fillStyle = effectiveTimerColor;
-      ctx.fill();
-
-      const secDisplay = Math.ceil(remaining);
-      ctx.font = `800 36px ${fontStack}`;
-      ctx.fillStyle = effectiveTimerColor;
+      ctx.scale(popScale, popScale);
+      ctx.direction = 'ltr';
+      ctx.font = `900 ${(unitSuffix ? (isWide ? 50 : 58) : isWide ? 64 : 74)}px ${fontStack}`;
       ctx.textAlign = 'center';
-      ctx.textBaseline = 'bottom';
-      ctx.fillText(String(secDisplay), 0, barY - 8);
-    } else if (template.timerStyle === 'circle') {
-      const radius = isWide ? 46 : 54;
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = isColorDark(timerBoxHex) ? 'rgba(0, 0, 0, 0.35)' : 'rgba(0, 0, 0, 0.12)';
+      ctx.fillText(secLabel, 0, 6);
+      ctx.fillStyle = isUrgent ? urgentColor : effectiveTimerColor;
+      ctx.fillText(secLabel, 0, 2);
+      ctx.restore();
+    } else if (template.timerStyle === 'hexBadge') {
+      const boxW = isWide ? 128 : 144;
+      const boxH = isWide ? 100 : 116;
+
+      drawStyledBoxContainer(ctx, {
+        x: -boxW / 2,
+        y: -boxH / 2,
+        w: boxW,
+        h: boxH,
+        radius: 24,
+        fillColorHex: timerBoxHex,
+        fillRgba: hexToRgba(timerBoxHex, 0.96),
+        opacity: 0.96,
+        borderColor: isUrgent ? urgentColor : customBorderColor || '#FACC15',
+        borderWidth: customBorderW >= 0 ? customBorderW : 4,
+        boxStyle: 'millionaireHex',
+        borderStyle: isUrgent ? 'solid' : 'gradientGold',
+        boxGloss: true,
+        enhanced: true,
+        shadowIntensity: Math.min(1.2, shadowIntensity),
+        glowIntensity: isUrgent ? 0.55 : Math.max(0.25, glowIntensity),
+        isHighlighted: isUrgent,
+        shadowOffsetY: 6,
+        drawFill: true,
+        drawBorder: (customBorderW >= 0 ? customBorderW : 4) > 0,
+      });
+
+      ctx.save();
+      ctx.scale(popScale, popScale);
+      ctx.direction = 'ltr';
+      ctx.font = `900 ${unitSuffix ? (isWide ? 44 : 52) : isWide ? 56 : 64}px 'JetBrains Mono', ${fontStack}`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = isColorDark(timerBoxHex) ? 'rgba(0,0,0,0.4)' : 'rgba(0,0,0,0.14)';
+      ctx.fillText(secLabel, 0, 5);
+      ctx.fillStyle = isUrgent ? urgentColor : effectiveTimerColor;
+      ctx.fillText(secLabel, 0, 2);
+      ctx.restore();
+    } else if (template.timerStyle === 'neonRing') {
+      const radius = isWide ? 47 : 54;
+      const ringColor = isUrgent ? urgentColor : customBorderColor || '#22D3EE';
+
+      ctx.save();
+      ctx.shadowColor = ringColor;
+      ctx.shadowBlur = isUrgent ? 26 : 18;
       ctx.beginPath();
       ctx.arc(0, 0, radius, 0, Math.PI * 2);
-      if (!matchBg) {
-        ctx.fillStyle = hexToRgba(template.timerBgColor || '#0f172a', 0.88);
-        ctx.fill();
-      }
-      ctx.strokeStyle = darkBg ? 'rgba(255, 255, 255, 0.22)' : 'rgba(0, 0, 0, 0.16)';
+      ctx.fillStyle = matchBg ? 'rgba(7, 11, 24, 0.88)' : hexToRgba(timerBoxHex, 0.92);
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.14)';
       ctx.lineWidth = 9;
       ctx.stroke();
 
       if (ratio > 0.01) {
         ctx.beginPath();
         ctx.arc(0, 0, radius, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * ratio);
-        ctx.strokeStyle = effectiveTimerColor;
+        ctx.strokeStyle = ringColor;
+        ctx.lineWidth = 9;
+        ctx.lineCap = 'round';
+        ctx.stroke();
+      }
+      ctx.restore();
+
+      ctx.save();
+      ctx.scale(popScale, popScale);
+      ctx.direction = 'ltr';
+      ctx.font = `900 ${unitSuffix ? (isWide ? 34 : 40) : isWide ? 42 : 48}px 'JetBrains Mono', ${fontStack}`;
+      ctx.fillStyle = isUrgent ? urgentColor : matchBg ? '#FFFFFF' : effectiveTimerColor;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(secLabel, 0, 2);
+      ctx.restore();
+    } else if (template.timerStyle === 'pillCountdown') {
+      const pillW = isWide ? 210 : 236;
+      const pillH = isWide ? 74 : 84;
+      drawStyledBoxContainer(ctx, {
+        x: -pillW / 2,
+        y: -pillH / 2,
+        w: pillW,
+        h: pillH,
+        radius: pillH / 2,
+        fillColorHex: timerBoxHex,
+        fillRgba: hexToRgba(timerBoxHex, 0.94),
+        opacity: 0.94,
+        borderColor: timerStrokeColor,
+        borderWidth: customBorderW >= 0 ? customBorderW : 3.5,
+        boxStyle: 'pill3d',
+        borderStyle: isUrgent ? 'solid' : borderStyle,
+        boxGloss: true,
+        enhanced: true,
+        shadowIntensity: Math.min(1, shadowIntensity),
+        glowIntensity: isUrgent ? 0.4 : glowIntensity,
+        drawFill: true,
+        drawBorder: (customBorderW >= 0 ? customBorderW : 3.5) > 0,
+      });
+
+      const trackW = pillW - 56;
+      const trackX = -trackW / 2;
+      const trackY = pillH / 2 - 17;
+      drawRoundedRect(ctx, trackX, trackY, trackW, 7, 3.5);
+      ctx.fillStyle = isColorDark(timerBoxHex) ? 'rgba(255,255,255,0.18)' : 'rgba(0,0,0,0.12)';
+      ctx.fill();
+
+      const fillW = Math.max(8, trackW * ratio);
+      drawRoundedRect(ctx, trackX + (trackW - fillW), trackY, fillW, 7, 3.5);
+      ctx.fillStyle = isUrgent ? urgentColor : template.correctColor || '#00B050';
+      ctx.fill();
+
+      ctx.save();
+      ctx.scale(popScale, popScale);
+      ctx.direction = 'ltr';
+      ctx.font = `900 ${isWide ? 38 : 42}px 'JetBrains Mono', ${fontStack}`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = activeAccentColor;
+      ctx.fillText(unitSuffix ? secLabel : `${secDisplay}s`, 0, -6);
+      ctx.restore();
+    } else if (template.timerStyle === 'bar') {
+      const barW = layoutTimer.boxW / Math.max(0.01, layoutTimer.effectiveScale);
+      const barH = 22;
+      const barX = -barW / 2;
+      const barY = -barH / 2 + 16;
+
+      drawRoundedRect(ctx, barX, barY, barW, barH, 11);
+      ctx.fillStyle = darkBg ? 'rgba(255, 255, 255, 0.18)' : 'rgba(0, 0, 0, 0.14)';
+      ctx.fill();
+
+      const fillW = Math.max(20, barW * ratio);
+      drawRoundedRect(ctx, barX + (barW - fillW), barY, fillW, barH, 11);
+      ctx.fillStyle = activeAccentColor;
+      ctx.fill();
+
+      ctx.direction = 'ltr';
+      ctx.font = `800 34px ${fontStack}`;
+      ctx.fillStyle = activeAccentColor;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'bottom';
+      ctx.fillText(secLabel, 0, barY - 6);
+    } else if (template.timerStyle === 'circle') {
+      const radius = isWide ? 44 : 50;
+      ctx.beginPath();
+      ctx.arc(0, 0, radius, 0, Math.PI * 2);
+      ctx.fillStyle = hexToRgba(timerBoxHex, matchBg ? 0.85 : 0.96);
+      ctx.fill();
+      ctx.strokeStyle = isColorDark(timerBoxHex) ? 'rgba(255, 255, 255, 0.24)' : 'rgba(0, 0, 0, 0.16)';
+      ctx.lineWidth = 9;
+      ctx.stroke();
+
+      if (ratio > 0.01) {
+        ctx.beginPath();
+        ctx.arc(0, 0, radius, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * ratio);
+        ctx.strokeStyle = isUrgent ? urgentColor : customBorderColor || effectiveTimerColor;
         ctx.lineWidth = 9;
         ctx.lineCap = 'round';
         ctx.stroke();
       }
 
-      const secDisplay = Math.ceil(remaining);
-      ctx.font = `800 ${isWide ? 38 : 44}px 'JetBrains Mono', monospace`;
-      ctx.fillStyle = effectiveTimerColor;
+      ctx.save();
+      ctx.scale(popScale, popScale);
+      ctx.direction = 'ltr';
+      ctx.font = `800 ${unitSuffix ? (isWide ? 30 : 35) : isWide ? 36 : 42}px 'JetBrains Mono', ${fontStack}`;
+      ctx.fillStyle = activeAccentColor;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillText(String(secDisplay), 0, 2);
+      ctx.fillText(secLabel, 0, 2);
+      ctx.restore();
     } else if (template.timerStyle === 'digits') {
-      const secDisplay = Math.ceil(remaining);
-      ctx.font = `900 ${isWide ? 74 : 84}px 'JetBrains Mono', monospace`;
+      const pillColor = activeAccentColor;
+      ctx.save();
+      ctx.scale(popScale, popScale);
+      ctx.direction = 'ltr';
+      ctx.font = `900 ${isWide ? 68 : 78}px 'JetBrains Mono', ${fontStack}`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillStyle = darkBg ? 'rgba(0,0,0,0.35)' : 'rgba(0,0,0,0.14)';
-      ctx.fillText(String(secDisplay), 0, 4);
-      ctx.fillStyle = effectiveTimerColor;
-      ctx.fillText(String(secDisplay), 0, 0);
+      ctx.fillStyle = darkBg ? 'rgba(0,0,0,0.4)' : 'rgba(0,0,0,0.14)';
+      ctx.fillText(secLabel, 0, 4);
+      ctx.fillStyle = pillColor;
+      ctx.fillText(secLabel, 0, 0);
+      ctx.restore();
     }
 
     ctx.restore();
   }
 
-  // 7. Optional Explanation Note on Reveal
-  if (
-    isRevealed &&
-    template.showExplanationOnReveal &&
-    slide.explanationText &&
-    slide.explanationText.trim()
-  ) {
+  // 7. Layer 7: Optional Explanation Note on Reveal (isolated below Options & belowOptions Timer)
+  if (isRevealed && layoutExplanation) {
     const expAlpha = clamp01(revealElapsed / 0.35);
-    const expY = isWide
-      ? Math.min(H - 80, optionsBottomPx + 74)
-      : Math.min(H - 290, optionsBottomPx + 95);
-    const expText = slide.explanationText.trim();
-    const expHasMath = hasMathSyntax(expText);
+    const expBg = template.explanationBgColor?.trim() || template.correctColor;
+    const expFg = template.explanationTextColor?.trim() || '#FFFFFF';
+    const {
+      x: boxX,
+      y: boxY,
+      boxW: expBoxW,
+      boxH: expBoxH,
+      centerX: expCenterX,
+      centerY: textCenterY,
+      lines: expLines,
+      hasMath: expHasMath,
+      fontSize: expFontSize,
+      text: expTextTrimmed,
+    } = layoutExplanation;
 
     ctx.save();
     ctx.globalAlpha *= expAlpha;
-    ctx.font = `700 30px ${fontStack}`;
-    ctx.direction = 'rtl';
-    const boxW = Math.min(W - 140, Math.max(760, (template.optionsWidth / 100) * W));
-    const maxW = boxW - 48;
-    const lines = expHasMath ? [expText] : wrapArabicText(ctx, expText, maxW).slice(0, 2);
-    const lineH = 42;
-    const boxH = lines.length * lineH + 34;
-    const boxX = (W - boxW) / 2 + shiftForWideLadder;
-    const boxY = expY - boxH / 2;
+    const maxW = expBoxW - 48;
+    const lineH = expFontSize + 10;
 
-    drawRoundedRect(ctx, boxX, boxY, boxW, boxH, 24);
-    ctx.fillStyle = hexToRgba(template.correctColor, 0.94);
+    drawRoundedRect(ctx, boxX, boxY, expBoxW, expBoxH, 24);
+    ctx.fillStyle = hexToRgba(expBg, 0.94);
     ctx.fill();
     ctx.strokeStyle = '#FFFFFF';
     ctx.lineWidth = 3;
     ctx.stroke();
 
     if (expHasMath) {
-      drawSmartQuizText(ctx, expText, W / 2 + shiftForWideLadder, expY, maxW, 30, fontStack, 700, '#FFFFFF', 2);
+      drawSmartQuizText(
+        ctx,
+        expTextTrimmed,
+        expCenterX,
+        textCenterY,
+        maxW,
+        expFontSize,
+        fontStack,
+        700,
+        expFg,
+        2
+      );
     } else {
-      ctx.fillStyle = '#FFFFFF';
+      ctx.font = `700 ${expFontSize}px ${fontStack}`;
+      ctx.direction = 'rtl';
+      ctx.fillStyle = expFg;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      const startLineY = expY - ((lines.length - 1) * lineH) / 2;
-      lines.forEach((line, idx) => {
-        ctx.fillText(line, W / 2 + shiftForWideLadder, startLineY + idx * lineH);
+      const startLineY = textCenterY - ((expLines.length - 1) * lineH) / 2;
+      expLines.forEach((line, idx) => {
+        ctx.fillText(line, expCenterX, startLineY + idx * lineH);
       });
     }
     ctx.restore();
@@ -2554,6 +4238,97 @@ export function renderQuizFrame(
 
   // 7.5 Channel Brand Logo / Animated Watermark & Handle
   drawBrandWatermark(ctx, template, globalTime, W, H, fontStack);
+
+  // Collect exact stage hitboxes for interactive preview dragging (account for globalScale around H*0.52)
+  const mapScaledBox = (cx: number, cy: number, bw: number, bh: number) => {
+    const scCx = W / 2 + (cx - W / 2) * globalScale;
+    const scCy = H * 0.52 + (cy - H * 0.52) * globalScale;
+    const scW = bw * globalScale;
+    const scH = bh * globalScale;
+    return { x: scCx - scW / 2, y: scCy - scH / 2, w: scW, h: scH };
+  };
+
+  const collectedHitboxes: StageElementHitbox[] = [];
+  if (layoutBadge) {
+    collectedHitboxes.push({
+      id: 'badge',
+      ...mapScaledBox(
+        layoutBadge.centerX,
+        layoutBadge.centerY,
+        layoutBadge.boxW * layoutBadge.scale,
+        layoutBadge.boxH * layoutBadge.scale
+      ),
+      label: 'الشارة',
+    });
+  }
+  collectedHitboxes.push({
+    id: 'question',
+    ...mapScaledBox(layoutQuestion.centerX, layoutQuestion.centerY, layoutQuestion.w, layoutQuestion.h),
+    label: 'السؤال',
+  });
+  collectedHitboxes.push({
+    id: 'options',
+    ...mapScaledBox(
+      layoutOptions.areaCenterX,
+      layoutOptions.startPx + layoutOptions.totalH / 2,
+      layoutOptions.totalW,
+      layoutOptions.totalH
+    ),
+    label: 'الخيارات',
+  });
+  if (layoutTimer.enabled) {
+    collectedHitboxes.push({
+      id: 'timer',
+      ...mapScaledBox(
+        layoutTimer.centerX,
+        layoutTimer.centerY,
+        Math.max(96, layoutTimer.boxW),
+        Math.max(84, layoutTimer.boxH)
+      ),
+      label: 'المؤقت',
+    });
+  }
+  if (template.brandLogoDataUrl || (template.brandHandleText || '').trim()) {
+    const bAnchor = resolveBrandAnchor(template, W, H);
+    collectedHitboxes.push({
+      id: 'brand',
+      x: bAnchor.anchorX - bAnchor.size / 2,
+      y: bAnchor.anchorY - bAnchor.size / 2,
+      w: bAnchor.size,
+      h: bAnchor.size + bAnchor.handleHeight,
+      label: 'الشعار',
+    });
+  }
+  if (outHitboxes) {
+    outHitboxes.push(...collectedHitboxes);
+  }
+
+  // Interactive Canvas Drag Outlines (Preview drag mode ONLY, never exported)
+  if (isPreview && interactiveState?.dragMode) {
+    ctx.save();
+    for (const hb of collectedHitboxes) {
+      const isSelected = interactiveState.activeTarget === hb.id;
+      ctx.strokeStyle = isSelected ? '#00B050' : 'rgba(237, 214, 162, 0.85)';
+      ctx.lineWidth = isSelected ? 4 : 2.5;
+      ctx.setLineDash(isSelected ? [] : [10, 8]);
+      ctx.strokeRect(hb.x - 6, hb.y - 6, hb.w + 12, hb.h + 12);
+
+      ctx.setLineDash([]);
+      ctx.font = `700 22px 'Cairo', sans-serif`;
+      ctx.direction = 'rtl';
+      const labelW = ctx.measureText(hb.label).width + 20;
+      const tagX = Math.max(8, Math.min(W - labelW - 8, hb.x + hb.w - labelW));
+      const tagY = Math.max(8, hb.y - 38);
+      drawRoundedRect(ctx, tagX, tagY, labelW, 30, 8);
+      ctx.fillStyle = isSelected ? '#00B050' : 'rgba(11, 15, 23, 0.88)';
+      ctx.fill();
+      ctx.fillStyle = '#FFFFFF';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(hb.label, tagX + labelW / 2, tagY + 16);
+    }
+    ctx.restore();
+  }
 
   // 8. YouTube Safe Zone Guide (Preview ONLY, never exported)
   if (isPreview && template.showSafeGuides) {
@@ -2598,12 +4373,9 @@ export async function exportThumbnailJpg(
   if (typeof document === 'undefined') return null;
   const { width, height } = getCanvasDimensions(template);
 
-  try {
-    await document.fonts.ready;
-  } catch {
-    // ignore
-  }
+  await ensureQuizFontsLoaded(template.fontFamily);
   await preloadTemplateBackground(template, slides);
+  clearRendererCaches();
 
   const canvas = document.createElement('canvas');
   canvas.width = width;

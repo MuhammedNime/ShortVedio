@@ -1,5 +1,5 @@
 import React, { useRef } from 'react';
-import { Music, Play, Trash2, Upload } from 'lucide-react';
+import { Music, Play, RotateCcw, Trash2, Upload } from 'lucide-react';
 import { BUILTIN_SFX_OPTIONS, soundEngine } from '../audio/soundEngine';
 import { readFileAsDataUrl } from '../storage/projectStore';
 import {
@@ -7,6 +7,7 @@ import {
   AudioSlotConfig,
   AudioSlotId,
   BuiltInSfxId,
+  DEFAULT_TIMING,
   TimingSettings,
 } from '../types/quiz';
 
@@ -307,9 +308,20 @@ export const AudioTimingPanel: React.FC<AudioTimingPanelProps> = ({
 
       {/* 2. Animation Timing Controls */}
       <section className="flex flex-col gap-3 border-t border-[var(--pline)] pt-5">
-        <h2 className="text-sm font-bold text-[var(--ptxt)]">
-          2. التوقيت والعداد (ثانية)
-        </h2>
+        <div className="flex items-center justify-between gap-2">
+          <h2 className="text-sm font-bold text-[var(--ptxt)]">
+            2. التوقيت والعداد (ثانية)
+          </h2>
+          <button
+            type="button"
+            onClick={() => onTimingChange({ ...DEFAULT_TIMING })}
+            title="استعادة أوقات التوقيت الافتراضية"
+            className="flex items-center gap-1 px-2 py-1 rounded-md bg-[var(--surface)] border border-[var(--pline)] hover:border-[#00B050] text-[11px] font-bold text-[var(--ptxt)] cursor-pointer"
+          >
+            <RotateCcw className="w-3 h-3 text-[#00B050]" />
+            <span>استعادة الافتراضي</span>
+          </button>
+        </div>
 
         <div className="flex flex-col gap-3">
           {[
@@ -317,49 +329,49 @@ export const AudioTimingPanel: React.FC<AudioTimingPanelProps> = ({
               key: 'introHold' as const,
               label: 'مهلة قبل ظهور السؤال (0 = فوري مع الصوت)',
               min: 0,
-              max: 2.0,
+              max: 4.0,
               step: 0.05,
             },
             {
               key: 'questionReadDelay' as const,
               label: 'مهلة السؤال قبل الخيار الأول',
-              min: 0.4,
-              max: 4.0,
+              min: 0.1,
+              max: 8.0,
               step: 0.1,
             },
             {
               key: 'optionStaggerDelay' as const,
               label: 'الفاصل بين كل خيار وآخر',
-              min: 0.25,
-              max: 2.0,
+              min: 0.1,
+              max: 4.0,
               step: 0.05,
             },
             {
               key: 'thinkingDuration' as const,
               label: 'مدة العداد في المنتصف (5 ث لعداد الفيديو)',
               min: 1.0,
-              max: 12.0,
+              max: 20.0,
               step: 0.5,
             },
             {
               key: 'suspenseDuration' as const,
               label: 'مدة التشويق والنبض قبل كشف الجواب',
               min: 0,
-              max: 3.0,
+              max: 5.0,
               step: 0.2,
             },
             {
               key: 'revealHoldDuration' as const,
               label: 'مدة بقاء الناتج الصحيح بالأخضر',
-              min: 1.0,
-              max: 6.0,
+              min: 0.5,
+              max: 12.0,
               step: 0.25,
             },
             {
               key: 'transitionGap' as const,
               label: 'فاصل بين الشرائح',
-              min: 0.1,
-              max: 2.0,
+              min: 0,
+              max: 4.0,
               step: 0.1,
             },
           ].map((item) => (

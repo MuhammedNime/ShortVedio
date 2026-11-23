@@ -12,7 +12,22 @@ export type OptionLayoutMode = 'channel2x2' | 'grid2x2' | 'vertical';
 
 export type OptionLabelStyle = 'arabic' | 'numbers' | 'english' | 'none';
 
-export type TimerStyle = 'channelBox' | 'bar' | 'circle' | 'digits' | 'none';
+export type TimerStyle =
+  | 'channelBox'
+  | 'circle'
+  | 'neonRing'
+  | 'hexBadge'
+  | 'pillCountdown'
+  | 'bar'
+  | 'digits'
+  | 'none';
+
+export type TimerPlacement = 'aboveOptions' | 'centerOfOptions' | 'belowOptions' | 'free';
+
+export type TimerVisibilityMode =
+  | 'afterOptionsBeforeAnswer'
+  | 'fromQuestion'
+  | 'untilReveal';
 
 export type BoxShapeStyle =
   | 'flat'
@@ -20,19 +35,37 @@ export type BoxShapeStyle =
   | 'inset'
   | 'glass'
   | 'neon'
-  | 'millionaireHex';
+  | 'millionaireHex'
+  | 'pill3d'
+  | 'chamfer'
+  | 'broadcastBar'
+  | 'ticket'
+  | 'layeredCard'
+  | 'minimalOutline';
 
-export type BoxBorderStyle = 'solid' | 'double' | 'gradientGold' | 'gradientNeon';
+export type BoxBorderStyle =
+  | 'solid'
+  | 'double'
+  | 'gradientGold'
+  | 'gradientNeon'
+  | 'metallicSilver'
+  | 'gradientSunset'
+  | 'dashedGold'
+  | 'cornerBrackets';
 
 export type BackgroundMotion = 'none' | 'slowZoom' | 'particles' | 'zoomAndParticles';
 
 export type PrizeLadderStyle = 'topStrip' | 'sideColumn';
 
 export type SlideType = 'multiple' | 'trueFalse';
+export type SlideDifficulty = 'none' | 'easy' | 'medium' | 'hard';
 
 export type OptionsAppearMode = 'stagger' | 'allAtOnce' | 'rowByRow';
 
-export type OptionTextAlign = 'auto' | 'center' | 'right';
+export type OptionTextAlign = 'auto' | 'center' | 'right' | 'left';
+export type QuestionTextAlign = 'center' | 'right' | 'left';
+export type ThemeApplyMode = 'bgOnly' | 'full';
+export type TimerUnitSuffix = '' | 's' | 'ث';
 
 export type ImageChallengeMode = 'normal' | 'blurToClear' | 'gradualClear';
 
@@ -54,6 +87,12 @@ export type PresetId =
   | 'neonCyber'
   | 'parchmentGold'
   | 'playfulKids'
+  | 'royalPurple'
+  | 'arcticCyan'
+  | 'sunsetCinema'
+  | 'ramadanLantern'
+  | 'crimsonArena'
+  | 'mintEditorial'
   | 'emerald'
   | 'navy'
   | 'obsidian';
@@ -97,11 +136,17 @@ export interface SlideVoiceover {
 
 export type BrandLogoAnimation = 'none' | 'pulse' | 'float' | 'glow' | 'spin';
 
-export type BrandCornerPosition = 'topRight' | 'topLeft' | 'bottomRight' | 'bottomLeft';
+export type BrandCornerPosition =
+  | 'topRight'
+  | 'topLeft'
+  | 'bottomRight'
+  | 'bottomLeft'
+  | 'custom';
 
 export interface QuestionSlide {
   id: string;
   slideType?: SlideType;
+  difficulty?: SlideDifficulty;
   badgeText: string;
   question: string;
   imageDataUrl?: string;
@@ -137,15 +182,22 @@ export interface TemplateSettings {
 
   fontFamily: 'Cairo' | 'Tajawal' | 'Amiri';
 
+  freeLayoutMode?: boolean;
+  themeApplyMode?: ThemeApplyMode;
+
   showBadge: boolean;
+  badgeX?: number; // percentage 10..90
   badgeY: number; // percentage 0..100
+  badgeBorderRadius?: number; // px
   badgeBgColor: string;
   badgeTextColor: string;
 
+  questionX?: number; // percentage 15..85
   questionY: number; // percentage 0..100
-  questionWidth: number; // percentage 40..96
-  questionHeightPct: number; // 0 = auto height, >0 = fixed channel height pct (e.g. 18.3)
+  questionWidth: number; // percentage 30..98
+  questionHeightPct: number; // 0 = auto height, >0 = fixed channel height pct (e.g. 16)
   questionFontSize: number; // px on 1080x1920
+  questionTextAlign?: QuestionTextAlign;
   questionTextColor: string;
   questionBoxColor: string;
   questionBoxOpacity: number; // 0..1
@@ -155,9 +207,11 @@ export interface TemplateSettings {
   questionAnim: AnimationStyle;
 
   optionsLayout: OptionLayoutMode;
+  optionsX?: number; // percentage 15..85
   optionsStartY: number; // percentage 0..100
-  optionsWidth: number; // percentage 40..100
-  optionsGap: number; // px on 1080x1920
+  optionsWidth: number; // percentage 35..100
+  optionsGap: number; // vertical row gap px
+  optionsColGap?: number; // 0 = match optionsGap, >0 = independent horizontal column gap px
   optionHeight: number; // px on 1080x1920
   optionFontSize: number; // px on 1080x1920
   optionLabelStyle: OptionLabelStyle;
@@ -175,7 +229,19 @@ export interface TemplateSettings {
   enhanceAppearance: boolean;
 
   timerStyle: TimerStyle;
-  timerY: number; // percentage 0..100
+  timerPlacement?: TimerPlacement;
+  timerX?: number; // percentage 5..95
+  timerY: number; // percentage 5..95
+  timerVisibilityMode?: TimerVisibilityMode;
+  timerUrgentPulse?: boolean;
+  timerUrgentThreshold?: number; // seconds 1..6
+  timerUrgentColor?: string;
+  timerUnitSuffix?: TimerUnitSuffix;
+  timerOpacity?: number; // 0.2..1
+  timerBorderColor?: string;
+  timerBorderWidth?: number; // -1 = inherit from questionBorderWidth
+  questionToOptionsGap?: number; // extra spacing px 0..180
+  optionsCenterGap?: number; // extra spacing px 0..140 when centered
   timerColor: string;
   timerBgColor: string;
   timerMatchBackground: boolean;
@@ -185,16 +251,23 @@ export interface TemplateSettings {
   wrongColor: string;
   revealStyle: RevealStyle;
   showExplanationOnReveal: boolean;
+  explanationBgColor?: string;
+  explanationTextColor?: string;
+  explanationOffsetY?: number;
   showSafeGuides: boolean;
 
   showEndCard: boolean;
   endCardText: string;
+  endCtaText?: string;
+  autoFitText?: boolean;
 
   brandLogoDataUrl?: string;
   brandLogoName?: string;
   brandLogoAnim: BrandLogoAnimation;
   brandLogoSize: number; // px on canvas
   brandLogoPosition: BrandCornerPosition;
+  brandLogoX?: number; // percentage 5..95 (when custom)
+  brandLogoY?: number; // percentage 5..95 (when custom)
   brandHandleText: string;
   brandOpacity: number; // 0.2..1
   showProgressCounter: boolean;
@@ -205,8 +278,8 @@ export interface TemplateSettings {
   shadowIntensity?: number; // 0..1.5
   glowIntensity?: number; // 0..1
   globalScale?: number; // 0.75..1.25
-  timerScale?: number; // 0.7..1.4
-  badgeScale?: number; // 0.7..1.4
+  timerScale?: number; // 0.5..1.8
+  badgeScale?: number; // 0.6..1.8
   bgMotion?: BackgroundMotion;
   revealConfetti?: boolean;
   highlightSpokenOption?: boolean;
@@ -263,11 +336,18 @@ export interface PresetBackdropInfo {
   swatchColor: string;
 }
 
+function withBasePath(relPath: string): string {
+  const base =
+    (import.meta as unknown as { env?: { BASE_URL?: string } })?.env?.BASE_URL || '/';
+  const normalizedBase = base.endsWith('/') ? base : `${base}/`;
+  return `${normalizedBase}${relPath.replace(/^\/+/, '')}`;
+}
+
 export const PRESET_BACKDROPS: PresetBackdropInfo[] = [
   {
     id: 'channelSand',
     label: 'قالب القناة الرملي',
-    src: '/src/assets/images/template_channel_sand.jpg',
+    src: withBasePath('src/assets/images/template_channel_sand.jpg'),
     swatchColor: '#EDD6A2',
   },
   {
@@ -289,8 +369,8 @@ export const PRESET_BACKDROPS: PresetBackdropInfo[] = [
   {
     id: 'channelMath',
     label: 'سبورة الرياضيات 🧮',
-    src: '/src/assets/images/math_board_vertical_1795360665242.jpg',
-    wideSrc: '/src/assets/images/math_board_wide_1795360665477.jpg',
+    src: withBasePath('src/assets/images/math_board_vertical_1795360665242.jpg'),
+    wideSrc: withBasePath('src/assets/images/math_board_wide_1795360665477.jpg'),
     swatchColor: '#113328',
   },
   {
@@ -334,21 +414,69 @@ export const PRESET_BACKDROPS: PresetBackdropInfo[] = [
     swatchColor: '#1d4ed8',
   },
   {
+    id: 'royalPurple',
+    label: 'البنفسجي الملكي 👑',
+    gradientInner: '#4c1d95',
+    gradientOuter: '#120529',
+    gradientStop: 0.74,
+    swatchColor: '#3b1578',
+  },
+  {
+    id: 'arcticCyan',
+    label: 'الجليدي الزجاجي ❄️',
+    gradientInner: '#0e4f73',
+    gradientOuter: '#041422',
+    gradientStop: 0.76,
+    swatchColor: '#0c3f5c',
+  },
+  {
+    id: 'sunsetCinema',
+    label: 'الغروب السينمائي 🌅',
+    gradientInner: '#7c2146',
+    gradientOuter: '#17071b',
+    gradientStop: 0.75,
+    swatchColor: '#5c1836',
+  },
+  {
+    id: 'ramadanLantern',
+    label: 'ليالي رمضانية 🌙',
+    gradientInner: '#163c4a',
+    gradientOuter: '#050f18',
+    gradientStop: 0.76,
+    swatchColor: '#12323f',
+  },
+  {
+    id: 'crimsonArena',
+    label: 'حلبة التحدي 🔥',
+    gradientInner: '#7a1222',
+    gradientOuter: '#140307',
+    gradientStop: 0.72,
+    swatchColor: '#5c0e1a',
+  },
+  {
+    id: 'mintEditorial',
+    label: 'النعناعي العصري 🌿',
+    gradientInner: '#e6f7ee',
+    gradientOuter: '#b4dfc9',
+    gradientStop: 0.86,
+    swatchColor: '#d2efe0',
+  },
+  {
     id: 'emerald',
     label: 'الزمرد الذهبي',
-    src: '/src/assets/images/template_emerald_studio_1795289851480.jpg',
+    src: withBasePath('src/assets/images/template_emerald_studio_1795289851480.jpg'),
     swatchColor: '#10b981',
   },
   {
     id: 'navy',
     label: 'الأزرق الليلي',
-    src: '/src/assets/images/template_navy_classic_1795289852308.jpg',
+    src: withBasePath('src/assets/images/template_navy_classic_1795289852308.jpg'),
     swatchColor: '#1e3a8a',
   },
   {
     id: 'obsidian',
     label: 'البرونز الداكن',
-    src: '/src/assets/images/template_warm_obsidian_1795289851537.jpg',
+    src: withBasePath('src/assets/images/template_warm_obsidian_1795289851537.jpg'),
     swatchColor: '#78350f',
   },
 ];
@@ -419,6 +547,12 @@ export const STUDIO_THEME_ORDER: PresetId[] = [
   'neonCyber',
   'parchmentGold',
   'playfulKids',
+  'royalPurple',
+  'arcticCyan',
+  'sunsetCinema',
+  'ramadanLantern',
+  'crimsonArena',
+  'mintEditorial',
 ];
 
 export function getCanvasDimensions(template?: Pick<TemplateSettings, 'aspectRatio'>): {
@@ -550,6 +684,14 @@ export function applyChannelThemePreset(
 }
 
 export function applyStudioThemePreset(
+  current: TemplateSettings,
+  presetId: PresetId
+): TemplateSettings {
+  const next = applyStudioThemePresetInternal(current, presetId);
+  return { ...next, freeLayoutMode: false };
+}
+
+function applyStudioThemePresetInternal(
   current: TemplateSettings,
   presetId: PresetId
 ): TemplateSettings {
@@ -751,6 +893,234 @@ export function applyStudioThemePreset(
     };
   }
 
+  if (presetId === 'royalPurple') {
+    return {
+      ...current,
+      backgroundType: 'preset',
+      presetId: 'royalPurple',
+      bgDimOpacity: 0,
+      bgMotion: 'particles',
+      fontFamily: 'Cairo',
+      boxStyle: 'pill3d',
+      borderStyle: 'gradientGold',
+      shadowIntensity: 1.2,
+      glowIntensity: 0.35,
+      boxGloss: true,
+      enhanceAppearance: true,
+      questionTextColor: '#FFFFFF',
+      questionBoxColor: '#291059',
+      questionBoxOpacity: 0.96,
+      questionBorderColor: '#fbbf24',
+      questionBorderWidth: 5,
+      questionBorderRadius: 48,
+      optionTextColor: '#FFFFFF',
+      optionBoxColor: '#341670',
+      optionBoxOpacity: 0.96,
+      optionBorderColor: '#f59e0b',
+      optionBorderWidth: 4,
+      optionBorderRadius: 36,
+      optionLabelBgColor: '#fbbf24',
+      optionLabelTextColor: '#1e0b40',
+      correctColor: '#10b981',
+      wrongColor: '#f43f5e',
+      revealStyle: 'redWrongGreenCorrect',
+      timerMatchBackground: true,
+      timerBgColor: '#291059',
+      timerColor: '#fde68a',
+      showPrizeLadder: false,
+    };
+  }
+
+  if (presetId === 'arcticCyan') {
+    return {
+      ...current,
+      backgroundType: 'preset',
+      presetId: 'arcticCyan',
+      bgDimOpacity: 0,
+      bgMotion: 'slowZoom',
+      fontFamily: 'Tajawal',
+      boxStyle: 'glass',
+      borderStyle: 'metallicSilver',
+      shadowIntensity: 1.05,
+      glowIntensity: 0.3,
+      boxGloss: true,
+      enhanceAppearance: true,
+      questionTextColor: '#F0F9FF',
+      questionBoxColor: '#0c3b5e',
+      questionBoxOpacity: 0.85,
+      questionBorderColor: '#7dd3fc',
+      questionBorderWidth: 4,
+      questionBorderRadius: 36,
+      optionTextColor: '#F0F9FF',
+      optionBoxColor: '#0f466e',
+      optionBoxOpacity: 0.84,
+      optionBorderColor: '#bae6fd',
+      optionBorderWidth: 4,
+      optionBorderRadius: 28,
+      optionLabelBgColor: '#38bdf8',
+      optionLabelTextColor: '#041422',
+      correctColor: '#10b981',
+      wrongColor: '#ef4444',
+      revealStyle: 'scaleCheck',
+      timerMatchBackground: true,
+      timerBgColor: '#0c3b5e',
+      timerColor: '#bae6fd',
+      showPrizeLadder: false,
+    };
+  }
+
+  if (presetId === 'sunsetCinema') {
+    return {
+      ...current,
+      backgroundType: 'preset',
+      presetId: 'sunsetCinema',
+      bgDimOpacity: 0,
+      bgMotion: 'zoomAndParticles',
+      fontFamily: 'Cairo',
+      boxStyle: 'broadcastBar',
+      borderStyle: 'gradientSunset',
+      shadowIntensity: 1.2,
+      glowIntensity: 0.35,
+      boxGloss: true,
+      enhanceAppearance: true,
+      questionTextColor: '#FFF7ED',
+      questionBoxColor: '#3f1232',
+      questionBoxOpacity: 0.94,
+      questionBorderColor: '#fb7185',
+      questionBorderWidth: 4,
+      questionBorderRadius: 30,
+      optionTextColor: '#FFF7ED',
+      optionBoxColor: '#4c163b',
+      optionBoxOpacity: 0.94,
+      optionBorderColor: '#f59e0b',
+      optionBorderWidth: 4,
+      optionBorderRadius: 24,
+      optionLabelBgColor: '#f97316',
+      optionLabelTextColor: '#FFFFFF',
+      correctColor: '#10b981',
+      wrongColor: '#e11d48',
+      revealStyle: 'redWrongGreenCorrect',
+      timerMatchBackground: true,
+      timerBgColor: '#3f1232',
+      timerColor: '#fed7aa',
+      showPrizeLadder: false,
+    };
+  }
+
+  if (presetId === 'ramadanLantern') {
+    return {
+      ...current,
+      backgroundType: 'preset',
+      presetId: 'ramadanLantern',
+      bgDimOpacity: 0,
+      bgMotion: 'particles',
+      fontFamily: 'Amiri',
+      boxStyle: 'layeredCard',
+      borderStyle: 'dashedGold',
+      shadowIntensity: 1.15,
+      glowIntensity: 0.25,
+      boxGloss: false,
+      enhanceAppearance: true,
+      questionTextColor: '#FEF3C7',
+      questionBoxColor: '#0e2d3b',
+      questionBoxOpacity: 0.95,
+      questionBorderColor: '#eab308',
+      questionBorderWidth: 4,
+      questionBorderRadius: 34,
+      optionTextColor: '#FEF3C7',
+      optionBoxColor: '#133a4b',
+      optionBoxOpacity: 0.95,
+      optionBorderColor: '#d4a73a',
+      optionBorderWidth: 4,
+      optionBorderRadius: 26,
+      optionLabelBgColor: '#eab308',
+      optionLabelTextColor: '#081d26',
+      correctColor: '#10b981',
+      wrongColor: '#ef4444',
+      revealStyle: 'highlightGlow',
+      timerMatchBackground: true,
+      timerBgColor: '#0e2d3b',
+      timerColor: '#FDE68A',
+      showPrizeLadder: false,
+    };
+  }
+
+  if (presetId === 'crimsonArena') {
+    return {
+      ...current,
+      backgroundType: 'preset',
+      presetId: 'crimsonArena',
+      bgDimOpacity: 0,
+      bgMotion: 'particles',
+      fontFamily: 'Cairo',
+      boxStyle: 'chamfer',
+      borderStyle: 'cornerBrackets',
+      shadowIntensity: 1.25,
+      glowIntensity: 0.4,
+      boxGloss: true,
+      enhanceAppearance: true,
+      questionTextColor: '#FFFFFF',
+      questionBoxColor: '#2d0811',
+      questionBoxOpacity: 0.95,
+      questionBorderColor: '#f43f5e',
+      questionBorderWidth: 4,
+      questionBorderRadius: 18,
+      optionTextColor: '#FFFFFF',
+      optionBoxColor: '#3a0b16',
+      optionBoxOpacity: 0.95,
+      optionBorderColor: '#fb7185',
+      optionBorderWidth: 4,
+      optionBorderRadius: 16,
+      optionLabelBgColor: '#f43f5e',
+      optionLabelTextColor: '#FFFFFF',
+      correctColor: '#16a34a',
+      wrongColor: '#991b1b',
+      revealStyle: 'scaleCheck',
+      timerMatchBackground: true,
+      timerBgColor: '#2d0811',
+      timerColor: '#fecdd3',
+      showPrizeLadder: false,
+    };
+  }
+
+  if (presetId === 'mintEditorial') {
+    return {
+      ...current,
+      backgroundType: 'preset',
+      presetId: 'mintEditorial',
+      bgDimOpacity: 0,
+      bgMotion: 'none',
+      fontFamily: 'Tajawal',
+      boxStyle: 'ticket',
+      borderStyle: 'solid',
+      shadowIntensity: 0.85,
+      glowIntensity: 0,
+      boxGloss: false,
+      enhanceAppearance: true,
+      questionTextColor: '#064e3b',
+      questionBoxColor: '#ffffff',
+      questionBoxOpacity: 0.98,
+      questionBorderColor: '#10b981',
+      questionBorderWidth: 4,
+      questionBorderRadius: 28,
+      optionTextColor: '#064e3b',
+      optionBoxColor: '#ffffff',
+      optionBoxOpacity: 0.98,
+      optionBorderColor: '#34d399',
+      optionBorderWidth: 4,
+      optionBorderRadius: 24,
+      optionLabelBgColor: '#10b981',
+      optionLabelTextColor: '#FFFFFF',
+      correctColor: '#059669',
+      wrongColor: '#e11d48',
+      revealStyle: 'redWrongGreenCorrect',
+      timerMatchBackground: true,
+      timerBgColor: '#065f46',
+      timerColor: '#064e3b',
+      showPrizeLadder: false,
+    };
+  }
+
   const preset = PRESET_BACKDROPS.find((p) => p.id === presetId);
   return {
     ...current,
@@ -786,30 +1156,38 @@ export const DEFAULT_TEMPLATE: TemplateSettings = {
   bgDimOpacity: 0,
 
   fontFamily: 'Cairo',
+  freeLayoutMode: false,
+  themeApplyMode: 'bgOnly',
 
   showBadge: false,
+  badgeX: 50,
   badgeY: 11,
+  badgeBorderRadius: 33,
   badgeBgColor: '#d4a73a',
   badgeTextColor: '#000000',
 
-  questionY: 36,
-  questionWidth: 68.6,
-  questionHeightPct: 18.3,
-  questionFontSize: 72,
+  questionX: 50,
+  questionY: 29,
+  questionWidth: 78,
+  questionHeightPct: 16,
+  questionFontSize: 66,
+  questionTextAlign: 'center',
   questionTextColor: '#000000',
   questionBoxColor: '#EDD6A2',
   questionBoxOpacity: 1,
   questionBorderColor: '#FFFFFF',
   questionBorderWidth: 5,
-  questionBorderRadius: 54,
+  questionBorderRadius: 48,
   questionAnim: 'pop',
 
   optionsLayout: 'channel2x2',
-  optionsStartY: 51.7,
-  optionsWidth: 100,
-  optionsGap: 28,
-  optionHeight: 148,
-  optionFontSize: 52,
+  optionsX: 50,
+  optionsStartY: 51,
+  optionsWidth: 94,
+  optionsGap: 26,
+  optionsColGap: 0,
+  optionHeight: 146,
+  optionFontSize: 50,
   optionLabelStyle: 'none',
   optionTextColor: '#000000',
   optionBoxColor: '#EDD6A2',
@@ -825,7 +1203,19 @@ export const DEFAULT_TEMPLATE: TemplateSettings = {
   enhanceAppearance: true,
 
   timerStyle: 'channelBox',
-  timerY: 61,
+  timerPlacement: 'aboveOptions',
+  timerX: 50,
+  timerY: 43,
+  timerVisibilityMode: 'afterOptionsBeforeAnswer',
+  timerUrgentPulse: true,
+  timerUrgentThreshold: 3,
+  timerUrgentColor: '#EF4444',
+  timerUnitSuffix: '',
+  timerOpacity: 1,
+  timerBorderColor: '',
+  timerBorderWidth: -1,
+  questionToOptionsGap: 0,
+  optionsCenterGap: 24,
   timerColor: '#000000',
   timerBgColor: '#F2E3BA',
   timerMatchBackground: true,
@@ -835,14 +1225,21 @@ export const DEFAULT_TEMPLATE: TemplateSettings = {
   wrongColor: '#DC2626',
   revealStyle: 'dimOthers',
   showExplanationOnReveal: false,
+  explanationBgColor: '',
+  explanationTextColor: '#FFFFFF',
+  explanationOffsetY: 0,
   showSafeGuides: false,
 
   showEndCard: true,
   endCardText: 'شكراً لمشاهدتكم',
+  endCtaText: '',
+  autoFitText: false,
 
   brandLogoAnim: 'pulse',
   brandLogoSize: 108,
   brandLogoPosition: 'topRight',
+  brandLogoX: 88,
+  brandLogoY: 10,
   brandHandleText: '',
   brandOpacity: 0.92,
   showProgressCounter: false,
@@ -974,7 +1371,7 @@ export function createDefaultProject(): QuizProject {
   return {
     id: 'default-shorts-project',
     name: 'مشروع شورتس القناة',
-    schemaVersion: 6,
+    schemaVersion: 8,
     preferredAiVoice: 'Kore',
     slides: DEFAULT_SLIDES.map((s) => ({
       ...s,
@@ -1020,7 +1417,7 @@ export function computeSlideSchedule(
     qSlot?.sourceType === 'custom' && qSlot.customDataUrl ? qSlot.duration ?? 0 : 0;
   const slideQDur = slide?.voiceover?.question?.duration ?? 0;
   const qDur = slideQDur > 0 ? slideQDur : globalQDur;
-  const qDelay = auto && qDur > 0 ? qDur + gap : timing?.questionReadDelay ?? 0.75;
+  const qDelay = auto && qDur > 0 ? Math.max(0.35, qDur + gap) : Math.max(0.2, timing?.questionReadDelay ?? 0.75);
 
   const tOpt0 = tQuestionStart + qDelay;
 
@@ -1030,14 +1427,14 @@ export function computeSlideSchedule(
 
   const optionCount = slide?.slideType === 'trueFalse' ? 2 : 4;
   const appearMode = template?.optionsAppearMode || 'stagger';
-  const defaultStagger = timing?.optionStaggerDelay ?? 0.45;
+  const defaultStagger = Math.max(0.15, timing?.optionStaggerDelay ?? 0.45);
   const tOptions: number[] = [tOpt0];
   let lastOptDuration = defaultStagger;
 
   const getOptStep = (idx: number): number => {
     const slideOptDur = slide?.voiceover?.options?.[idx]?.duration ?? 0;
     const optDur = slideOptDur > 0 ? slideOptDur : globalOptDur;
-    return auto && optDur > 0 ? optDur + gap : defaultStagger;
+    return auto && optDur > 0 ? Math.max(0.25, optDur + gap) : defaultStagger;
   };
 
   if (appearMode === 'allAtOnce') {
@@ -1093,7 +1490,7 @@ export function computeSlideSchedule(
   const slideAnsDur = slide?.voiceover?.answer?.duration ?? 0;
   const ansDur = slideAnsDur > 0 ? slideAnsDur : globalAnsDur;
 
-  const baseRevealHold = timing?.revealHoldDuration ?? 3.0;
+  const baseRevealHold = Math.max(0.5, timing?.revealHoldDuration ?? 3.0);
   const revealHold =
     auto && ansDur > 0 ? Math.max(baseRevealHold, ansDur + gap) : baseRevealHold;
 
@@ -1137,10 +1534,11 @@ export function computeProjectTimeline(
 ): SlideSchedule[] {
   const schedules: SlideSchedule[] = [];
   let cursor = getIntroHookDuration(template, timing);
+  const gap = Math.max(0, timing?.transitionGap ?? 0.35);
   for (let i = 0; i < slides.length; i++) {
     const sched = computeSlideSchedule(slides[i], i, cursor, timing, audio, template);
     schedules.push(sched);
-    cursor = sched.endTime + (i < slides.length - 1 ? timing.transitionGap : 0);
+    cursor = sched.endTime + (i < slides.length - 1 ? gap : 0);
   }
   return schedules;
 }

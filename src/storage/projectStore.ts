@@ -15,7 +15,7 @@ const ACTIVE_PROJECT_KEY = 'active_project_v1';
 const LIBRARY_INDEX_KEY = 'projects_library_index_v1';
 const ACTIVE_PROJECT_ID_KEY = 'active_project_id_v1';
 const PROJECT_ITEM_PREFIX = 'project_item_';
-const CURRENT_SCHEMA_VERSION = 7;
+const CURRENT_SCHEMA_VERSION = 8;
 
 export interface ProjectSummary {
   id: string;
@@ -80,7 +80,7 @@ function openDatabase(): Promise<IDBDatabase> {
   });
 }
 
-async function idbGet<T>(key: string): Promise<T | undefined> {
+export async function idbGet<T>(key: string): Promise<T | undefined> {
   const db = await openDatabase();
   return new Promise((resolve) => {
     const timer = setTimeout(() => {
@@ -110,7 +110,7 @@ async function idbGet<T>(key: string): Promise<T | undefined> {
   });
 }
 
-async function idbSet(key: string, value: unknown): Promise<void> {
+export async function idbSet(key: string, value: unknown): Promise<void> {
   const db = await openDatabase();
   return new Promise((resolve, reject) => {
     try {
@@ -132,7 +132,7 @@ async function idbSet(key: string, value: unknown): Promise<void> {
   });
 }
 
-async function idbDelete(key: string): Promise<void> {
+export async function idbDelete(key: string): Promise<void> {
   const db = await openDatabase();
   return new Promise((resolve) => {
     try {
@@ -180,9 +180,15 @@ function sanitizeSlide(raw: Partial<QuestionSlide> | null | undefined, idx: numb
     ? Math.max(10, Math.min(50, Math.round(rawBlur)))
     : undefined;
 
+  const difficulty =
+    raw?.difficulty === 'easy' || raw?.difficulty === 'medium' || raw?.difficulty === 'hard'
+      ? raw.difficulty
+      : 'none';
+
   return {
     id: typeof raw?.id === 'string' && raw.id ? raw.id : `slide-${Date.now()}-${idx}`,
     slideType,
+    difficulty,
     badgeText: typeof raw?.badgeText === 'string' ? raw.badgeText : `السؤال ${idx + 1}`,
     question: typeof raw?.question === 'string' ? raw.question : 'اكتب نص السؤال هنا',
     imageDataUrl: typeof raw?.imageDataUrl === 'string' ? raw.imageDataUrl : undefined,
@@ -242,6 +248,31 @@ export function normalizeLoadedProject(
     }
   }
 
+  if ((result.schemaVersion ?? 0) < 8) {
+    const looksLikeLegacyChannelDefaults =
+      Math.abs((mergedTemplate.questionY ?? 36) - 36) < 0.5 &&
+      Math.abs((mergedTemplate.timerY ?? 61) - 61) < 0.5 &&
+      Math.abs((mergedTemplate.optionsStartY ?? 51.7) - 51.7) < 0.6;
+    if (looksLikeLegacyChannelDefaults) {
+      mergedTemplate.questionY = DEFAULT_TEMPLATE.questionY;
+      mergedTemplate.questionWidth = DEFAULT_TEMPLATE.questionWidth;
+      mergedTemplate.questionHeightPct = DEFAULT_TEMPLATE.questionHeightPct;
+      mergedTemplate.questionFontSize = DEFAULT_TEMPLATE.questionFontSize;
+      mergedTemplate.questionBorderRadius = DEFAULT_TEMPLATE.questionBorderRadius;
+      mergedTemplate.timerY = DEFAULT_TEMPLATE.timerY;
+      mergedTemplate.optionsStartY = DEFAULT_TEMPLATE.optionsStartY;
+      mergedTemplate.optionsWidth = DEFAULT_TEMPLATE.optionsWidth;
+      mergedTemplate.optionHeight = DEFAULT_TEMPLATE.optionHeight;
+      mergedTemplate.optionFontSize = DEFAULT_TEMPLATE.optionFontSize;
+    } else if ((mergedTemplate.timerY ?? 43) >= (mergedTemplate.optionsStartY ?? 51)) {
+      // Ensure timer stays cleanly above option boxes
+      mergedTemplate.timerY = Math.max(
+        20,
+        Math.min(DEFAULT_TEMPLATE.timerY, (mergedTemplate.optionsStartY ?? 51) - 8)
+      );
+    }
+  }
+
   mergedTemplate = {
     ...DEFAULT_TEMPLATE,
     ...mergedTemplate,
@@ -253,6 +284,8 @@ export function normalizeLoadedProject(
     wrongColor: mergedTemplate.wrongColor || DEFAULT_TEMPLATE.wrongColor,
     showEndCard: mergedTemplate.showEndCard ?? true,
     endCardText: mergedTemplate.endCardText || DEFAULT_TEMPLATE.endCardText,
+    endCtaText: mergedTemplate.endCtaText ?? '',
+    autoFitText: Boolean(mergedTemplate.autoFitText),
     timerColor: mergedTemplate.timerColor || DEFAULT_TEMPLATE.timerColor,
     timerBgColor: mergedTemplate.timerBgColor || DEFAULT_TEMPLATE.timerBgColor,
     brandLogoAnim: mergedTemplate.brandLogoAnim || 'pulse',
@@ -264,6 +297,31 @@ export function normalizeLoadedProject(
 
     boxStyle: mergedTemplate.boxStyle || 'flat',
     borderStyle: mergedTemplate.borderStyle || 'solid',
+    freeLayoutMode: Boolean(mergedTemplate.freeLayoutMode),
+    themeApplyMode: mergedTemplate.themeApplyMode === 'full' ? 'full' : 'bgOnly',
+    badgeX: sanitizeNumber(mergedTemplate.badgeX, DEFAULT_TEMPLATE.badgeX ?? 50),
+    badgeBorderRadius: sanitizeNumber(mergedTemplate.badgeBorderRadius, DEFAULT_TEMPLATE.badgeBorderRadius ?? 33),
+    questionX: sanitizeNumber(mergedTemplate.questionX, DEFAULT_TEMPLATE.questionX ?? 50),
+    questionTextAlign: mergedTemplate.questionTextAlign || 'center',
+    optionsX: sanitizeNumber(mergedTemplate.optionsX, DEFAULT_TEMPLATE.optionsX ?? 50),
+    optionsColGap: sanitizeNumber(mergedTemplate.optionsColGap, 0),
+    timerPlacement: mergedTemplate.timerPlacement || 'aboveOptions',
+    timerX: sanitizeNumber(mergedTemplate.timerX, 50),
+    timerVisibilityMode: mergedTemplate.timerVisibilityMode || 'afterOptionsBeforeAnswer',
+    timerUrgentPulse: mergedTemplate.timerUrgentPulse ?? true,
+    timerUrgentThreshold: sanitizeNumber(mergedTemplate.timerUrgentThreshold, 3),
+    timerUrgentColor: mergedTemplate.timerUrgentColor || '#EF4444',
+    timerUnitSuffix: mergedTemplate.timerUnitSuffix ?? '',
+    timerOpacity: sanitizeNumber(mergedTemplate.timerOpacity, 1),
+    timerBorderColor: mergedTemplate.timerBorderColor ?? '',
+    timerBorderWidth: sanitizeNumber(mergedTemplate.timerBorderWidth, -1),
+    questionToOptionsGap: sanitizeNumber(mergedTemplate.questionToOptionsGap, 0),
+    optionsCenterGap: sanitizeNumber(mergedTemplate.optionsCenterGap, 24),
+    explanationBgColor: mergedTemplate.explanationBgColor ?? '',
+    explanationTextColor: mergedTemplate.explanationTextColor || '#FFFFFF',
+    explanationOffsetY: sanitizeNumber(mergedTemplate.explanationOffsetY, 0),
+    brandLogoX: sanitizeNumber(mergedTemplate.brandLogoX, 88),
+    brandLogoY: sanitizeNumber(mergedTemplate.brandLogoY, 10),
     shadowIntensity: sanitizeNumber(mergedTemplate.shadowIntensity, 1),
     glowIntensity: sanitizeNumber(mergedTemplate.glowIntensity, 0),
     globalScale: sanitizeNumber(mergedTemplate.globalScale, 1),
