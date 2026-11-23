@@ -21,7 +21,7 @@ export const CANVAS_WIDTH = 1080;
 export const CANVAS_HEIGHT = 1920;
 
 export interface TimelineSoundEvent {
-  type: 'questionEnter' | 'optionEnter' | 'countdownTick' | 'suspense' | 'correctReveal';
+  type: 'introHook' | 'questionEnter' | 'optionEnter' | 'countdownTick' | 'suspense' | 'correctReveal';
   slideIndex: number;
   optionIndex?: number;
   tickSecond?: number;
@@ -75,6 +75,10 @@ export function collectSoundEventsInInterval(
   const events: TimelineSoundEvent[] = [];
   if (currTime <= prevTime || slides.length === 0) return events;
 
+  if (template?.showIntroHook && prevTime < 0 && currTime >= 0) {
+    events.push({ type: 'introHook', slideIndex: 0 });
+  }
+
   const schedules = computeProjectTimeline(slides, timing, audio, template);
 
   for (const sched of schedules) {
@@ -92,8 +96,13 @@ export function collectSoundEventsInInterval(
 
     const optCount = slides[sIdx]?.slideType === 'trueFalse' ? 2 : 4;
     tOpts.forEach((tOpt, oIdx) => {
-      if (oIdx < optCount && prevTime < tOpt && currTime >= tOpt) {
-        events.push({ type: 'optionEnter', slideIndex: sIdx, optionIndex: oIdx });
+      if (oIdx >= optCount) return;
+      if (prevTime < tOpt && currTime >= tOpt) {
+        const sameTimeAsPrev = oIdx > 0 && Math.abs(tOpt - tOpts[oIdx - 1]) < 0.01;
+        const hasOwnVoice = Boolean(slides[sIdx]?.voiceover?.options?.[oIdx]?.dataUrl);
+        if (!sameTimeAsPrev || hasOwnVoice) {
+          events.push({ type: 'optionEnter', slideIndex: sIdx, optionIndex: oIdx });
+        }
       }
     });
 
@@ -1394,7 +1403,7 @@ export function renderQuizFrame(
   // 1. Cached Background Layer + Optional Motion & Particles
   drawCachedBackdrop(ctx, template, globalTime, W, H);
 
-  const introDur = getIntroHookDuration(template);
+  const introDur = getIntroHookDuration(template, timing);
   if (introDur > 0 && slides.length > 0 && globalTime < introDur) {
     const enterProg = clamp01(globalTime / 0.3);
     const exitProg = globalTime > introDur - 0.22 ? clamp01((introDur - globalTime) / 0.22) : 1;
@@ -1687,14 +1696,15 @@ export function renderQuizFrame(
   if (qProgress > 0) {
     const tr = computeAnimTransform(qProgress, template.questionAnim);
 
+    const userQW = (Math.max(40, Math.min(96, template.questionWidth || 68.6)) / 100) * W;
     const qW = isWide
       ? slideImg
-        ? Math.min(W * 0.62, 1180)
-        : Math.min(W - 140, Math.max(1280, (template.questionWidth / 100) * W * 1.12))
-      : (template.questionWidth / 100) * W;
+        ? Math.min(W * 0.64, userQW)
+        : Math.min(W - (shiftForWideLadder > 0 ? 340 : 120), userQW)
+      : userQW;
 
     const qCenterY = isWide
-      ? Math.max(210, Math.min(H * 0.34, (template.questionY / 100) * H * 0.72))
+      ? Math.max(170, Math.min(H * 0.48, (template.questionY / 100) * H * 0.78))
       : (template.questionY / 100) * H;
 
     const padX = isWide ? 48 : 28;
@@ -1924,41 +1934,43 @@ export function renderQuizFrame(
   const revealAnim = isRevealed ? easeOutBack(clamp01(revealElapsed / 0.35)) : 0;
   const revealFade = isRevealed ? clamp01(revealElapsed / 0.25) : 0;
 
+  const userOptAreaW = (Math.max(50, Math.min(100, template.optionsWidth ?? 100)) / 100) * W;
   const totalOptionsW = isWide
-    ? Math.min(
-        W - (shiftForWideLadder > 0 ? 360 : 140),
-        Math.max(shiftForWideLadder > 0 ? 1160 : 1340, (template.optionsWidth / 100) * W)
-      )
-    : (template.optionsWidth / 100) * W;
+    ? Math.min(W - (shiftForWideLadder > 0 ? 340 : 100), userOptAreaW)
+    : userOptAreaW;
 
   const optionsStartPx = isWide
-    ? Math.max(H * 0.45, Math.min(H * 0.56, (template.optionsStartY / 100) * H * 0.92))
+    ? Math.max(H * 0.34, Math.min(H * 0.72, (template.optionsStartY / 100) * H * 0.94))
     : (template.optionsStartY / 100) * H;
 
   const optionCount = isTrueFalse ? 2 : 4;
   const rowsCount = template.optionsLayout === 'vertical' ? (isTrueFalse ? 2 : 4) : isTrueFalse ? 1 : 2;
   const baseOptH = isWide
     ? template.optionsLayout === 'vertical'
-      ? 104
-      : Math.min(156, Math.max(122, template.optionHeight))
+      ? Math.min(126, Math.max(80, Math.round(template.optionHeight * 0.78)))
+      : Math.min(168, Math.max(96, template.optionHeight))
     : template.optionHeight;
   const effectiveOptH = isTrueFalse && template.optionsLayout !== 'vertical'
     ? Math.max(baseOptH, isWide ? 164 : 184)
     : baseOptH;
 
+  const userGap = Math.max(6, template.optionsGap ?? 28);
   const effectiveRowGap = isChannelLayout
     ? isWide
-      ? 48
-      : Math.max(12, Math.round(0.112 * H - effectiveOptH))
+      ? Math.max(16, userGap + 20)
+      : template.timerStyle === 'channelBox'
+        ? Math.max(12, userGap + 39)
+        : userGap
     : isWide
-      ? Math.min(28, template.optionsGap)
-      : template.optionsGap;
+      ? Math.min(48, userGap)
+      : userGap;
 
   const optionsBottomPx =
     optionsStartPx + rowsCount * effectiveOptH + Math.max(0, rowsCount - 1) * effectiveRowGap;
 
   const wrongColor = template.wrongColor || '#DC2626';
   const isRedWrongMode = template.revealStyle === 'redWrongGreenCorrect';
+  const rtlCols = template.optionsRtlColumns !== false;
   let correctOriginX = W / 2;
   let correctOriginY = optionsStartPx + effectiveOptH;
 
@@ -1984,37 +1996,47 @@ export function renderQuizFrame(
 
     if (template.optionsLayout === 'channel2x2') {
       if (isWide) {
-        // Widescreen 16:9 2x2 around central timer gap
-        boxW = shiftForWideLadder > 0 ? 0.365 * W : 0.405 * W;
+        // Widescreen 16:9 2x2 with central timer clearance & full width/gap freedom
+        const wideColGap = Math.max(
+          20,
+          userGap + (template.timerStyle === 'channelBox' && !isTrueFalse ? 120 : 12)
+        );
+        boxW = (totalOptionsW - wideColGap) / 2;
         const row = Math.floor(i / 2);
-        const isRightCol = i % 2 === 0; // 0,2 on right in RTL; 1,3 on left
-        centerX =
-          (isRightCol ? W * 0.755 : W * 0.245) +
-          (shiftForWideLadder > 0 ? (isRightCol ? 74 : 152) : 0);
+        const col = i % 2;
+        const isRightCol = rtlCols ? col === 0 : col === 1;
+        const areaLeft = (W - totalOptionsW) / 2 + shiftForWideLadder;
+        centerX = isRightCol
+          ? areaLeft + boxW + wideColGap + boxW / 2
+          : areaLeft + boxW / 2;
         centerY = optionsStartPx + row * (boxH + effectiveRowGap) + boxH / 2;
       } else if (isTrueFalse) {
-        // True/False 9:16 side-by-side wide cards with clean center gap
-        boxW = 0.44 * W;
-        const colLeft = i === 0 ? 0.53 * W : 0.03 * W;
-        const rowTop = (template.optionsStartY / 100) * H;
-        centerX = colLeft + boxW / 2;
-        centerY = rowTop + boxH / 2;
+        const tfW = Math.min(totalOptionsW, Math.round(W * 0.94));
+        const tfGap = Math.max(16, userGap);
+        boxW = (tfW - tfGap) / 2;
+        const areaLeft = (W - tfW) / 2;
+        const isRightCol = rtlCols ? i === 0 : i === 1;
+        centerX = isRightCol ? areaLeft + boxW + tfGap + boxW / 2 : areaLeft + boxW / 2;
+        centerY = optionsStartPx + boxH / 2;
       } else {
-        // Vertical 9:16 channel s0..s3 coordinates
-        boxW = 0.488 * W;
-        const colLeft = i % 2 === 0 ? 0.515 * W : 0;
-        const rowOffsetPct = i >= 2 ? 0.112 : 0;
-        const rowTop = (template.optionsStartY / 100 + rowOffsetPct) * H;
-        centerX = colLeft + boxW / 2;
-        centerY = rowTop + boxH / 2;
+        // Vertical 9:16 2x2 responsive to optionsWidth, optionsGap, and optionsRtlColumns
+        const colGap = Math.max(8, userGap);
+        boxW = (totalOptionsW - colGap) / 2;
+        const row = Math.floor(i / 2);
+        const col = i % 2;
+        const isRightCol = rtlCols ? col === 0 : col === 1;
+        const areaLeft = (W - totalOptionsW) / 2;
+        centerX = isRightCol ? areaLeft + boxW + colGap + boxW / 2 : areaLeft + boxW / 2;
+        centerY = optionsStartPx + row * (boxH + effectiveRowGap) + boxH / 2;
       }
     } else if (template.optionsLayout === 'grid2x2') {
-      const colGap = isWide ? Math.max(36, template.optionsGap) : template.optionsGap;
+      const colGap = Math.max(8, userGap);
       boxW = (totalOptionsW - colGap) / 2;
       const row = Math.floor(i / 2);
       const col = i % 2;
-      const rightStart = (W + totalOptionsW) / 2 + shiftForWideLadder;
-      centerX = rightStart - col * (boxW + colGap) - boxW / 2;
+      const isRightCol = rtlCols ? col === 0 : col === 1;
+      const areaLeft = (W - totalOptionsW) / 2 + shiftForWideLadder;
+      centerX = isRightCol ? areaLeft + boxW + colGap + boxW / 2 : areaLeft + boxW / 2;
       centerY = optionsStartPx + row * (boxH + effectiveRowGap) + boxH / 2;
     }
 
@@ -2267,28 +2289,30 @@ export function renderQuizFrame(
       const optLineH = optFontSize * 1.25;
       const optStartY = -((optLines.length - 1) * optLineH) / 2;
 
-      if ((isChannelLayout || template.optionsLayout === 'grid2x2') && !hasBadge) {
+      const alignMode = template.optionTextAlign || 'auto';
+      const useCenteredText =
+        alignMode === 'center'
+          ? true
+          : alignMode === 'right'
+            ? false
+            : ((isChannelLayout || template.optionsLayout === 'grid2x2') && !hasBadge) || isTrueFalse;
+
+      if (useCenteredText) {
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
+        const centerTextX = hasBadge ? -(rightReserve - iconReserve) * 0.28 : 0;
         if (enhanced) {
           ctx.fillStyle =
             isRevealed || isColorDark(template.optionBoxColor)
               ? 'rgba(0,0,0,0.32)'
               : 'rgba(255,255,255,0.28)';
           optLines.slice(0, 2).forEach((line, lIdx) => {
-            ctx.fillText(line, 0, optStartY + lIdx * optLineH + 2);
+            ctx.fillText(line, centerTextX, optStartY + lIdx * optLineH + 2);
           });
         }
         ctx.fillStyle = optColor;
         optLines.slice(0, 2).forEach((line, lIdx) => {
-          ctx.fillText(line, 0, optStartY + lIdx * optLineH);
-        });
-      } else if (isTrueFalse) {
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        const tfCenterX = hasBadge ? -(rightReserve - iconReserve) * 0.28 : 0;
-        optLines.slice(0, 2).forEach((line, lIdx) => {
-          ctx.fillText(line, tfCenterX, optStartY + lIdx * optLineH);
+          ctx.fillText(line, centerTextX, optStartY + lIdx * optLineH);
         });
       } else {
         ctx.textAlign = 'right';

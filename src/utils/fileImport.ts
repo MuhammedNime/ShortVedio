@@ -107,26 +107,59 @@ interface DocLine {
   bold: boolean;
 }
 
+const EXPLICIT_Q_RE = /^\s*(?:السؤال|س)\s*[\d٠-٩]*\s*[).\-:/،]?\s*/;
+
 function groupLines(lines: DocLine[]): RawQ[] {
-  const numbered = lines.filter((l) => QNUM_RE.test(l.text)).length;
+  const nonBlank = lines.filter((l) => l.text.length > 0);
+  const explicitHeads = nonBlank.filter((l) => EXPLICIT_Q_RE.test(l.text) || (QNUM_RE.test(l.text) && !OPT_PREFIX_RE.test(l.text))).length;
+  const numericHeads = nonBlank.filter((l) => QNUM_RE.test(l.text)).length;
+
   const groups: DocLine[][] = [];
 
-  if (numbered >= 2) {
+  if (explicitHeads >= 2 || (numericHeads >= 2 && nonBlank.length >= 10)) {
     let cur: DocLine[] | null = null;
-    for (const l of lines) {
-      if (QNUM_RE.test(l.text) && !OPT_PREFIX_RE.test(l.text.replace(QNUM_RE, '') ) ) {
-        cur = [{ ...l, text: l.text.replace(QNUM_RE, '') }];
+    for (const l of nonBlank) {
+      const isExplicitQ = EXPLICIT_Q_RE.test(l.text);
+      const isQNum = QNUM_RE.test(l.text);
+      const looksLikeOptionInsideQuestion =
+        cur !== null && cur.length >= 1 && cur.length < 5 && OPT_PREFIX_RE.test(l.text);
+
+      if (isExplicitQ || (isQNum && !looksLikeOptionInsideQuestion && (cur === null || cur.length >= 5))) {
+        cur = [{ ...l, text: l.text.replace(QNUM_RE, '').trim() || l.text }];
         groups.push(cur);
-      } else if (cur) cur.push(l);
+      } else if (cur) {
+        cur.push(l);
+      }
     }
   } else {
-    for (let i = 0; i + 4 < lines.length; i += 5) groups.push(lines.slice(i, i + 5));
+    // Check if document separates questions by blank paragraphs
+    const blankSeparated: DocLine[][] = [];
+    let curBlock: DocLine[] = [];
+    for (const l of lines) {
+      if (!l.text) {
+        if (curBlock.length > 0) {
+          blankSeparated.push(curBlock);
+          curBlock = [];
+        }
+      } else {
+        curBlock.push(l);
+      }
+    }
+    if (curBlock.length > 0) blankSeparated.push(curBlock);
+
+    if (blankSeparated.length >= 2 && blankSeparated.every((b) => b.length >= 5)) {
+      groups.push(...blankSeparated);
+    } else {
+      for (let i = 0; i + 4 < nonBlank.length; i += 5) {
+        groups.push(nonBlank.slice(i, i + 5));
+      }
+    }
   }
 
   const out: RawQ[] = [];
   for (const g of groups) {
     if (g.length < 5) continue;
-    const question = g[0].text.trim();
+    const question = g[0].text.replace(QNUM_RE, '').trim() || g[0].text.trim();
     let correct = -1;
     const options = g.slice(1, 5).map((l, i) => {
       let t = l.text.trim();
@@ -164,7 +197,12 @@ async function docxToLines(file: File): Promise<DocLine[]> {
   const lines: DocLine[] = [];
   doc.querySelectorAll('p, li').forEach((el) => {
     const text = (el.textContent ?? '').replace(/\s+/g, ' ').trim();
-    if (!text) return;
+    if (!text) {
+      if (lines.length > 0 && lines[lines.length - 1].text !== '') {
+        lines.push({ text: '', bold: false });
+      }
+      return;
+    }
     const boldLen = Array.from(el.querySelectorAll('strong, b')).reduce(
       (n, b) => n + (b.textContent ?? '').trim().length,
       0

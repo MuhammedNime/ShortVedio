@@ -445,6 +445,7 @@ export default function App() {
             {activeTab === 'template' && (
               <TemplateDesignPanel
                 template={project.template}
+                aiVoiceName={project.preferredAiVoice ?? 'Kore'}
                 onChange={(nextTemplate) =>
                   setProject((prev) => ({ ...prev, template: nextTemplate }))
                 }

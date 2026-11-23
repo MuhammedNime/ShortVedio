@@ -30,6 +30,10 @@ export type PrizeLadderStyle = 'topStrip' | 'sideColumn';
 
 export type SlideType = 'multiple' | 'trueFalse';
 
+export type OptionsAppearMode = 'stagger' | 'allAtOnce' | 'rowByRow';
+
+export type OptionTextAlign = 'auto' | 'center' | 'right';
+
 export type ImageChallengeMode = 'normal' | 'blurToClear' | 'gradualClear';
 
 export type SlideTransitionStyle =
@@ -208,13 +212,18 @@ export interface TemplateSettings {
   highlightSpokenOption?: boolean;
   showIntroHook?: boolean;
   introHookText?: string;
-  introHookDuration?: number; // 0.6..2.5s
+  introHookDuration?: number; // 0.6..6.0s
+  introHookAudio?: SlideAudioClip;
+  introHookSfx?: BuiltInSfxId;
   showEndSubscribeCta?: boolean;
   showPrizeLadder?: boolean;
   prizeLadderStyle?: PrizeLadderStyle;
   prizeLadderTitle?: string;
   prizeLadderAmounts?: string[];
   slideTransition?: SlideTransitionStyle;
+  optionsAppearMode?: OptionsAppearMode;
+  optionTextAlign?: OptionTextAlign;
+  optionsRtlColumns?: boolean;
 }
 
 export interface TimingSettings {
@@ -753,6 +762,21 @@ export function applyStudioThemePreset(
   };
 }
 
+export function applyThemeBackgroundOnly(
+  current: TemplateSettings,
+  presetId: PresetId
+): TemplateSettings {
+  const preset = PRESET_BACKDROPS.find((p) => p.id === presetId);
+  return {
+    ...current,
+    backgroundType: 'preset',
+    presetId,
+    timerBgColor: current.timerMatchBackground
+      ? preset?.swatchColor ?? current.timerBgColor
+      : current.timerBgColor,
+  };
+}
+
 export const DEFAULT_TEMPLATE: TemplateSettings = {
   aspectRatio: '9:16',
 
@@ -836,12 +860,16 @@ export const DEFAULT_TEMPLATE: TemplateSettings = {
   showIntroHook: false,
   introHookText: 'اختبر معلوماتك الآن!',
   introHookDuration: 1.2,
+  introHookSfx: 'whoosh',
   showEndSubscribeCta: false,
   showPrizeLadder: false,
   prizeLadderStyle: 'topStrip',
   prizeLadderTitle: 'الجائزة',
   prizeLadderAmounts: [...DEFAULT_PRIZE_LADDER],
   slideTransition: 'fade',
+  optionsAppearMode: 'stagger',
+  optionTextAlign: 'auto',
+  optionsRtlColumns: true,
 };
 
 export const DEFAULT_TIMING: TimingSettings = {
@@ -979,7 +1007,8 @@ export function computeSlideSchedule(
   slideIndex: number,
   startTime: number,
   timing: TimingSettings,
-  audio: AudioSettings
+  audio: AudioSettings,
+  template?: Pick<TemplateSettings, 'optionsAppearMode'>
 ): SlideSchedule {
   const auto = timing?.autoSyncWithAudio ?? true;
   const gap = Math.max(0, timing?.audioEndGap ?? 0.15);
@@ -1000,18 +1029,41 @@ export function computeSlideSchedule(
     optSlot?.sourceType === 'custom' && optSlot.customDataUrl ? optSlot.duration ?? 0 : 0;
 
   const optionCount = slide?.slideType === 'trueFalse' ? 2 : 4;
+  const appearMode = template?.optionsAppearMode || 'stagger';
+  const defaultStagger = timing?.optionStaggerDelay ?? 0.45;
   const tOptions: number[] = [tOpt0];
-  let lastOptDuration = 0;
+  let lastOptDuration = defaultStagger;
 
-  for (let i = 0; i < optionCount; i++) {
-    const slideOptDur = slide?.voiceover?.options?.[i]?.duration ?? 0;
+  const getOptStep = (idx: number): number => {
+    const slideOptDur = slide?.voiceover?.options?.[idx]?.duration ?? 0;
     const optDur = slideOptDur > 0 ? slideOptDur : globalOptDur;
-    const step = auto && optDur > 0 ? optDur + gap : timing?.optionStaggerDelay ?? 0.45;
+    return auto && optDur > 0 ? optDur + gap : defaultStagger;
+  };
 
-    if (i < optionCount - 1) {
-      tOptions.push(tOptions[i] + step);
-    } else {
-      lastOptDuration = auto && optDur > 0 ? optDur + gap : 0.45;
+  if (appearMode === 'allAtOnce') {
+    let maxStep = defaultStagger;
+    for (let i = 0; i < optionCount; i++) {
+      tOptions[i] = tOpt0;
+      const s = getOptStep(i);
+      if (s > maxStep) maxStep = s;
+    }
+    lastOptDuration = maxStep;
+  } else if (appearMode === 'rowByRow' && optionCount === 4) {
+    const row0Step = Math.max(getOptStep(0), getOptStep(1));
+    const row1Step = Math.max(getOptStep(2), getOptStep(3));
+    tOptions[0] = tOpt0;
+    tOptions[1] = tOpt0;
+    tOptions[2] = tOpt0 + row0Step;
+    tOptions[3] = tOpt0 + row0Step;
+    lastOptDuration = row1Step;
+  } else {
+    for (let i = 0; i < optionCount; i++) {
+      const step = getOptStep(i);
+      if (i < optionCount - 1) {
+        tOptions.push(tOptions[i] + step);
+      } else {
+        lastOptDuration = step;
+      }
     }
   }
 
@@ -1061,10 +1113,20 @@ export function computeSlideSchedule(
   };
 }
 
-export function getIntroHookDuration(template?: Pick<TemplateSettings, 'showIntroHook' | 'introHookDuration'>): number {
+export function getIntroHookDuration(
+  template?: Pick<TemplateSettings, 'showIntroHook' | 'introHookDuration' | 'introHookAudio'>,
+  timing?: Pick<TimingSettings, 'autoSyncWithAudio' | 'audioEndGap'>
+): number {
   if (!template?.showIntroHook) return 0;
-  const dur = Number(template.introHookDuration ?? 1.2);
-  return Math.max(0.5, Math.min(3.5, Number.isFinite(dur) ? dur : 1.2));
+  const rawDur = Number(template.introHookDuration ?? 1.2);
+  const baseDur = Math.max(0.5, Math.min(8.0, Number.isFinite(rawDur) ? rawDur : 1.2));
+  const auto = timing?.autoSyncWithAudio ?? true;
+  const audioDur = template.introHookAudio?.duration ?? 0;
+  if (auto && audioDur > 0) {
+    const gap = Math.max(0, timing?.audioEndGap ?? 0.15);
+    return Math.max(baseDur, audioDur + gap);
+  }
+  return baseDur;
 }
 
 export function computeProjectTimeline(
@@ -1074,9 +1136,9 @@ export function computeProjectTimeline(
   template?: TemplateSettings
 ): SlideSchedule[] {
   const schedules: SlideSchedule[] = [];
-  let cursor = getIntroHookDuration(template);
+  let cursor = getIntroHookDuration(template, timing);
   for (let i = 0; i < slides.length; i++) {
-    const sched = computeSlideSchedule(slides[i], i, cursor, timing, audio);
+    const sched = computeSlideSchedule(slides[i], i, cursor, timing, audio, template);
     schedules.push(sched);
     cursor = sched.endTime + (i < slides.length - 1 ? timing.transitionGap : 0);
   }

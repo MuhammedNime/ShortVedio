@@ -4,12 +4,17 @@ import {
   Crown,
   ImagePlus,
   LayoutTemplate,
+  Loader2,
   Monitor,
+  Play,
   Smartphone,
   Sparkles,
   Trash2,
+  Upload,
   X,
 } from 'lucide-react';
+import { BUILTIN_SFX_OPTIONS, soundEngine } from '../audio/soundEngine';
+import { AiVoiceName, generateSingleTtsClip } from '../services/aiClient';
 import {
   CustomTemplatePreset,
   deleteCustomPreset,
@@ -24,10 +29,13 @@ import {
   BoxShapeStyle,
   BrandCornerPosition,
   BrandLogoAnimation,
+  BuiltInSfxId,
   DEFAULT_PRIZE_LADDER,
   DEFAULT_TEMPLATE,
   OptionLabelStyle,
   OptionLayoutMode,
+  OptionTextAlign,
+  OptionsAppearMode,
   PRESET_BACKDROPS,
   PrizeLadderStyle,
   RevealStyle,
@@ -35,10 +43,13 @@ import {
   TemplateSettings,
   TimerStyle,
   applyStudioThemePreset,
+  applyThemeBackgroundOnly,
 } from '../types/quiz';
+import { MicRecordButton } from './MicRecordButton';
 
 interface TemplateDesignPanelProps {
   template: TemplateSettings;
+  aiVoiceName?: AiVoiceName;
   onChange: (next: TemplateSettings) => void;
 }
 
@@ -53,14 +64,19 @@ const ANIM_OPTIONS: { id: AnimationStyle; label: string }[] = [
 
 export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
   template,
+  aiVoiceName = 'Kore',
   onChange,
 }) => {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const logoInputRef = useRef<HTMLInputElement | null>(null);
+  const hookAudioInputRef = useRef<HTMLInputElement | null>(null);
   const [customPresets, setCustomPresets] = useState<CustomTemplatePreset[]>(() =>
     loadCustomPresets()
   );
   const [presetNameInput, setPresetNameInput] = useState('');
+  const [themeApplyMode, setThemeApplyMode] = useState<'bgOnly' | 'full'>('bgOnly');
+  const [isHookVoicing, setIsHookVoicing] = useState(false);
+  const [hookAudioError, setHookAudioError] = useState('');
 
   const patch = (partial: Partial<TemplateSettings>) => {
     onChange({ ...template, ...partial });
@@ -160,7 +176,11 @@ export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
   };
 
   const handleSelectPreset = (presetId: TemplateSettings['presetId']) => {
-    onChange(applyStudioThemePreset(template, presetId));
+    if (themeApplyMode === 'bgOnly') {
+      onChange(applyThemeBackgroundOnly(template, presetId));
+    } else {
+      onChange(applyStudioThemePreset(template, presetId));
+    }
   };
 
   const handleSaveCustomPreset = () => {
@@ -193,6 +213,49 @@ export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
       customBgName: file.name,
     });
     e.target.value = '';
+  };
+
+  const handleUploadHookAudio = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    setHookAudioError('');
+    try {
+      const dataUrl = await readFileAsDataUrl(file);
+      const duration = await soundEngine.getAudioDuration(dataUrl);
+      patch({
+        introHookAudio: {
+          fileName: file.name,
+          dataUrl,
+          duration: duration > 0 ? duration : 1.5,
+        },
+      });
+    } catch {
+      setHookAudioError('تعذر قراءة ملف الصوت.');
+    }
+  };
+
+  const handleGenerateHookAiVoice = async () => {
+    const text = (template.introHookText ?? 'اختبر معلوماتك الآن!').trim();
+    if (!text) {
+      setHookAudioError('اكتب نص شريحة المقدمة أولاً.');
+      return;
+    }
+    try {
+      soundEngine.getContext();
+    } catch {
+      // ignore
+    }
+    setHookAudioError('');
+    setIsHookVoicing(true);
+    try {
+      const clip = await generateSingleTtsClip(text, aiVoiceName, 'hook-voice.wav');
+      patch({ introHookAudio: clip });
+    } catch (err) {
+      setHookAudioError(err instanceof Error ? err.message : 'تعذر توليد صوت المقدمة.');
+    } finally {
+      setIsHookVoicing(false);
+    }
   };
 
   return (
@@ -331,9 +394,37 @@ export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
 
       {/* 1. Channel Themes & Background */}
       <section className="flex flex-col gap-3 border-t border-[var(--pline)] pt-5">
-        <h2 className="text-sm font-bold text-[var(--ptxt)]">
-          1. ثيمات القناة والخلفية الثابتة ({template.aspectRatio === '16:9' ? '16:9' : '9:16'})
-        </h2>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-sm font-bold text-[var(--ptxt)]">
+            1. ثيمات القناة والخلفية ({template.aspectRatio === '16:9' ? '16:9' : '9:16'})
+          </h2>
+        </div>
+
+        {/* Freedom Mode Switch: Apply Backdrop Only vs Full Theme Override */}
+        <div className="grid grid-cols-2 gap-1.5 p-1 rounded-xl bg-[var(--surface)] border border-[var(--pline)]">
+          <button
+            type="button"
+            onClick={() => setThemeApplyMode('bgOnly')}
+            className={`px-2 py-1.5 rounded-lg text-[11px] font-bold transition-colors cursor-pointer ${
+              themeApplyMode === 'bgOnly'
+                ? 'bg-[#00B050] text-white'
+                : 'text-[var(--pmuted)] hover:text-[var(--ptxt)]'
+            }`}
+          >
+            خلفية فقط (حفظ تعديلاتي)
+          </button>
+          <button
+            type="button"
+            onClick={() => setThemeApplyMode('full')}
+            className={`px-2 py-1.5 rounded-lg text-[11px] font-bold transition-colors cursor-pointer ${
+              themeApplyMode === 'full'
+                ? 'bg-[var(--gold)] text-[#0c0c0c]'
+                : 'text-[var(--pmuted)] hover:text-[var(--ptxt)]'
+            }`}
+          >
+            تطبيق الثيم كامل (ألوان + شكل)
+          </button>
+        </div>
 
         <div className="grid grid-cols-3 gap-2">
           {PRESET_BACKDROPS.map((preset) => {
@@ -543,6 +634,36 @@ export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
               step={2}
               value={template.questionFontSize}
               onChange={(e) => patch({ questionFontSize: parseInt(e.target.value, 10) })}
+            />
+          </label>
+
+          <label className="flex flex-col gap-1">
+            <div className="flex justify-between text-xs text-[var(--ptxt)]">
+              <span>عرض مربع السؤال</span>
+              <span className="font-mono-nums">{Math.round(template.questionWidth)}%</span>
+            </div>
+            <input
+              type="range"
+              min={45}
+              max={96}
+              step={1}
+              value={template.questionWidth}
+              onChange={(e) => patch({ questionWidth: parseFloat(e.target.value) })}
+            />
+          </label>
+
+          <label className="flex flex-col gap-1">
+            <div className="flex justify-between text-xs text-[var(--ptxt)]">
+              <span>استدارة زوايا السؤال</span>
+              <span className="font-mono-nums">{template.questionBorderRadius}px</span>
+            </div>
+            <input
+              type="range"
+              min={0}
+              max={70}
+              step={2}
+              value={template.questionBorderRadius}
+              onChange={(e) => patch({ questionBorderRadius: parseInt(e.target.value, 10) })}
             />
           </label>
 
@@ -876,7 +997,7 @@ export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
 
       {/* 3. Four Options Layout & Styling */}
       <section className="flex flex-col gap-3 border-t border-[var(--pline)] pt-5">
-        <h2 className="text-sm font-bold text-[var(--ptxt)]">3. تخطيط الخيارات الأربعة</h2>
+        <h2 className="text-sm font-bold text-[var(--ptxt)]">3. تخطيط الخيارات وحرية العرض</h2>
 
         <div className="grid grid-cols-2 gap-2">
           <div className="flex flex-col gap-1">
@@ -907,6 +1028,36 @@ export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
               <option value="english">A · B · C · D</option>
             </select>
           </label>
+
+          <label className="flex flex-col gap-1">
+            <span className="text-xs text-[var(--pmuted)]">طريقة ظهور الخيارات</span>
+            <select
+              value={template.optionsAppearMode || 'stagger'}
+              onChange={(e) =>
+                patch({ optionsAppearMode: e.target.value as OptionsAppearMode })
+              }
+              className="px-3 py-2 rounded-lg bg-[var(--surface)] border border-[var(--pline)] text-xs text-[var(--ptxt)] focus:border-[#00B050] focus:outline-none"
+            >
+              <option value="stagger">تتابعي (خياراً بعد خيار)</option>
+              <option value="allAtOnce">دفعة واحدة (كلها معاً)</option>
+              <option value="rowByRow">صفاً بصف (اثنان معاً)</option>
+            </select>
+          </label>
+
+          <label className="flex flex-col gap-1">
+            <span className="text-xs text-[var(--pmuted)]">محاذاة نص الخيار</span>
+            <select
+              value={template.optionTextAlign || 'auto'}
+              onChange={(e) =>
+                patch({ optionTextAlign: e.target.value as OptionTextAlign })
+              }
+              className="px-3 py-2 rounded-lg bg-[var(--surface)] border border-[var(--pline)] text-xs text-[var(--ptxt)] focus:border-[#00B050] focus:outline-none"
+            >
+              <option value="auto">تلقائي حسب القالب</option>
+              <option value="center">توسيط داخل الصندوق</option>
+              <option value="right">محاذاة لليمين</option>
+            </select>
+          </label>
         </div>
 
         <div className="grid grid-cols-2 gap-3">
@@ -926,6 +1077,18 @@ export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
           </label>
 
           <label className="flex flex-col gap-1">
+            <span className="text-xs text-[var(--pmuted)]">اتجاه الأعمدة (في 2×2)</span>
+            <select
+              value={template.optionsRtlColumns !== false ? 'rtl' : 'ltr'}
+              onChange={(e) => patch({ optionsRtlColumns: e.target.value === 'rtl' })}
+              className="px-3 py-2 rounded-lg bg-[var(--surface)] border border-[var(--pline)] text-xs text-[var(--ptxt)] focus:border-[#00B050] focus:outline-none"
+            >
+              <option value="rtl">من اليمين لليسار (أ يمين · ب يسار)</option>
+              <option value="ltr">من اليسار لليمين (أ يسار · ب يمين)</option>
+            </select>
+          </label>
+
+          <label className="flex flex-col gap-1">
             <div className="flex justify-between text-xs text-[var(--ptxt)]">
               <span>بداية الخيارات</span>
               <span className="font-mono-nums">{template.optionsStartY}%</span>
@@ -937,6 +1100,51 @@ export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
               step={0.5}
               value={template.optionsStartY}
               onChange={(e) => patch({ optionsStartY: parseFloat(e.target.value) })}
+            />
+          </label>
+
+          <label className="flex flex-col gap-1">
+            <div className="flex justify-between text-xs text-[var(--ptxt)]">
+              <span>عرض منطقة الخيارات</span>
+              <span className="font-mono-nums">{Math.round(template.optionsWidth)}%</span>
+            </div>
+            <input
+              type="range"
+              min={50}
+              max={100}
+              step={2}
+              value={template.optionsWidth}
+              onChange={(e) => patch({ optionsWidth: parseInt(e.target.value, 10) })}
+            />
+          </label>
+
+          <label className="flex flex-col gap-1">
+            <div className="flex justify-between text-xs text-[var(--ptxt)]">
+              <span>المسافة بين الخيارات</span>
+              <span className="font-mono-nums">{template.optionsGap}px</span>
+            </div>
+            <input
+              type="range"
+              min={6}
+              max={64}
+              step={2}
+              value={template.optionsGap}
+              onChange={(e) => patch({ optionsGap: parseInt(e.target.value, 10) })}
+            />
+          </label>
+
+          <label className="flex flex-col gap-1">
+            <div className="flex justify-between text-xs text-[var(--ptxt)]">
+              <span>استدارة حواف الخيار</span>
+              <span className="font-mono-nums">{template.optionBorderRadius}px</span>
+            </div>
+            <input
+              type="range"
+              min={0}
+              max={64}
+              step={2}
+              value={template.optionBorderRadius}
+              onChange={(e) => patch({ optionBorderRadius: parseInt(e.target.value, 10) })}
             />
           </label>
 
@@ -1151,9 +1359,9 @@ export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
         </label>
 
         {/* Intro Hook Card Setting */}
-        <div className="flex flex-col gap-2 p-3 rounded-xl bg-[var(--surface)] border border-[var(--pline)]">
+        <div className="flex flex-col gap-2.5 p-3 rounded-xl bg-[var(--surface)] border border-[var(--pline)]">
           <label className="flex items-center justify-between gap-2 cursor-pointer">
-            <span className="text-xs font-bold text-[var(--ptxt)]">شريحة مقدمة سريعة (Hook)</span>
+            <span className="text-xs font-bold text-[var(--ptxt)]">شريحة مقدمة سريعة (Hook) + الصوت</span>
             <input
               type="checkbox"
               checked={Boolean(template.showIntroHook)}
@@ -1162,7 +1370,7 @@ export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
             />
           </label>
           {template.showIntroHook && (
-            <div className="flex flex-col gap-2">
+            <div className="flex flex-col gap-2.5 pt-1 border-t border-[var(--pline)]">
               <input
                 type="text"
                 value={template.introHookText ?? 'اختبر معلوماتك الآن!'}
@@ -1170,20 +1378,127 @@ export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
                 placeholder="اختبر معلوماتك الآن!"
                 className="w-full px-3 py-1.5 rounded-lg bg-[var(--panel)] border border-[var(--pline)] text-xs text-[var(--ptxt)] focus:border-[#00B050] focus:outline-none"
               />
-              <label className="flex flex-col gap-1">
-                <div className="flex justify-between text-[11px] text-[var(--pmuted)]">
-                  <span>مدة شريحة المقدمة</span>
-                  <span className="font-mono-nums">{(template.introHookDuration ?? 1.2).toFixed(1)} ث</span>
+              <div className="grid grid-cols-2 gap-2">
+                <label className="flex flex-col gap-1">
+                  <div className="flex justify-between text-[11px] text-[var(--pmuted)]">
+                    <span>مدة المقدمة</span>
+                    <span className="font-mono-nums">{(template.introHookDuration ?? 1.2).toFixed(1)} ث</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={0.6}
+                    max={6.0}
+                    step={0.1}
+                    value={template.introHookDuration ?? 1.2}
+                    onChange={(e) => patch({ introHookDuration: parseFloat(e.target.value) })}
+                  />
+                </label>
+
+                <label className="flex flex-col gap-1">
+                  <span className="text-[11px] text-[var(--pmuted)]">مؤثر دخول الهوك (SFX)</span>
+                  <select
+                    value={template.introHookSfx ?? 'whoosh'}
+                    onChange={(e) => patch({ introHookSfx: e.target.value as BuiltInSfxId })}
+                    className="px-2.5 py-1.5 rounded-lg bg-[var(--panel)] border border-[var(--pline)] text-[11px] text-[var(--ptxt)] focus:border-[#00B050] focus:outline-none"
+                  >
+                    {BUILTIN_SFX_OPTIONS.map((sfx) => (
+                      <option key={sfx.id} value={sfx.id}>
+                        {sfx.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+
+              {/* Hook Voiceover Controls: AI TTS + Mic Record + File Upload */}
+              <div className="flex flex-col gap-1.5 p-2.5 rounded-lg bg-[var(--panel)] border border-[var(--pline)]">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[11px] font-bold text-[var(--ptxt)]">
+                    صوت المقدمة (الهوك)
+                  </span>
+                  {template.introHookAudio?.duration ? (
+                    <span className="text-[10px] font-mono-nums text-[#00B050] dark:text-[#6ee7b7]">
+                      {template.introHookAudio.fileName} ({template.introHookAudio.duration.toFixed(1)}ث)
+                    </span>
+                  ) : (
+                    <span className="text-[10px] text-[var(--pmuted)]">
+                      بدون تعليق صوتي (يُسمع المؤثر فقط)
+                    </span>
+                  )}
                 </div>
+
                 <input
-                  type="range"
-                  min={0.6}
-                  max={2.5}
-                  step={0.1}
-                  value={template.introHookDuration ?? 1.2}
-                  onChange={(e) => patch({ introHookDuration: parseFloat(e.target.value) })}
+                  ref={hookAudioInputRef}
+                  type="file"
+                  accept="audio/*"
+                  onChange={(e) => void handleUploadHookAudio(e)}
+                  className="hidden"
                 />
-              </label>
+
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <button
+                    type="button"
+                    disabled={isHookVoicing}
+                    onClick={() => void handleGenerateHookAiVoice()}
+                    className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-[#00B050] hover:bg-[#00c85b] disabled:opacity-50 text-white text-[11px] font-bold cursor-pointer"
+                  >
+                    {isHookVoicing ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Sparkles className="w-3.5 h-3.5" />
+                    )}
+                    <span>{isHookVoicing ? 'جارٍ التوليد...' : 'توليد صوت للهوك'}</span>
+                  </button>
+
+                  <MicRecordButton
+                    compact
+                    fileNameBase="hook-voice"
+                    onError={(msg) => setHookAudioError(msg)}
+                    onRecorded={(clip) => {
+                      setHookAudioError('');
+                      patch({ introHookAudio: clip });
+                    }}
+                  />
+
+                  <button
+                    type="button"
+                    onClick={() => hookAudioInputRef.current?.click()}
+                    className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-[var(--surface)] hover:border-[var(--gold)] border border-[var(--pline)] text-[11px] font-semibold text-[var(--ptxt)] cursor-pointer"
+                  >
+                    <Upload className="w-3.5 h-3.5" />
+                    <span>رفع ملف صوت</span>
+                  </button>
+
+                  {template.introHookAudio?.dataUrl && (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (template.introHookAudio) {
+                            void soundEngine.playClip(template.introHookAudio, 1);
+                          }
+                        }}
+                        title="تشغيل صوت المقدمة"
+                        className="p-1.5 rounded-lg bg-[var(--surface)] hover:border-[#00B050] border border-[var(--pline)] text-[#00B050] cursor-pointer"
+                      >
+                        <Play className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => patch({ introHookAudio: undefined })}
+                        title="حذف صوت المقدمة"
+                        className="p-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 text-rose-400 cursor-pointer"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </>
+                  )}
+                </div>
+
+                {hookAudioError && (
+                  <p className="text-[11px] text-rose-400">{hookAudioError}</p>
+                )}
+              </div>
             </div>
           )}
         </div>

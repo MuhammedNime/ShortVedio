@@ -4,11 +4,13 @@ import {
   QuestionSlide,
   TemplateSettings,
   TimingSettings,
+  computeProjectTimeline,
   getCanvasDimensions,
+  getIntroHookDuration,
   getTotalDuration,
 } from '../types/quiz';
 import {
-  collectSoundEventsInInterval,
+  TimelineSoundEvent,
   preloadTemplateBackground,
   preloadTimerVideo,
   renderQuizFrame,
@@ -27,9 +29,14 @@ export interface ExportResult {
   extension: 'mp4' | 'webm';
 }
 
-function getPreferredMimeType(): { mimeType: string; extension: 'mp4' | 'webm' } {
-  // MP4 أولاً (أوسع توافقاً مع برامج المونتاج والموبايلات)، ثم WebM كاحتياط
+interface ScheduledTimelineAudio {
+  time: number;
+  event: TimelineSoundEvent;
+}
+
+function getPreferredMimeTypes(): { mimeType: string; extension: 'mp4' | 'webm' }[] {
   const candidates: { mimeType: string; extension: 'mp4' | 'webm' }[] = [
+    { mimeType: 'video/mp4;codecs=avc1.42E01E,mp4a.40.2', extension: 'mp4' },
     { mimeType: 'video/mp4;codecs=avc1.640028,mp4a.40.2', extension: 'mp4' },
     { mimeType: 'video/mp4;codecs=avc1,mp4a.40.2', extension: 'mp4' },
     { mimeType: 'video/mp4', extension: 'mp4' },
@@ -38,12 +45,115 @@ function getPreferredMimeType(): { mimeType: string; extension: 'mp4' | 'webm' }
     { mimeType: 'video/webm', extension: 'webm' },
   ];
 
-  for (const c of candidates) {
-    if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(c.mimeType)) {
-      return c;
+  const supported =
+    typeof MediaRecorder !== 'undefined'
+      ? candidates.filter((c) => MediaRecorder.isTypeSupported(c.mimeType))
+      : [];
+
+  return supported.length > 0 ? supported : [{ mimeType: '', extension: 'webm' }];
+}
+
+function buildScheduledAudioPlan(
+  slides: QuestionSlide[],
+  timing: TimingSettings,
+  audio: AudioSettings,
+  template: TemplateSettings
+): {
+  events: ScheduledTimelineAudio[];
+  speechIntervals: Array<{ start: number; end: number }>;
+} {
+  const events: ScheduledTimelineAudio[] = [];
+  const speechIntervals: Array<{ start: number; end: number }> = [];
+
+  const introDur = getIntroHookDuration(template, timing);
+  if (introDur > 0 && slides.length > 0) {
+    events.push({
+      time: 0,
+      event: { type: 'introHook', slideIndex: 0 },
+    });
+    if (template.introHookAudio?.dataUrl && (template.introHookAudio.duration ?? 0) > 0.2) {
+      speechIntervals.push({
+        start: 0,
+        end: template.introHookAudio.duration,
+      });
     }
   }
-  return { mimeType: '', extension: 'webm' };
+
+  const schedules = computeProjectTimeline(slides, timing, audio, template);
+  for (const sched of schedules) {
+    const sIdx = sched.slideIndex;
+    const slide = slides[sIdx];
+    const base = sched.startTime;
+
+    const tQ = base + sched.tQuestionStart;
+    events.push({
+      time: tQ,
+      event: { type: 'questionEnter', slideIndex: sIdx },
+    });
+    if (slide?.voiceover?.question?.dataUrl && slide.voiceover.question.duration > 0.2) {
+      speechIntervals.push({
+        start: tQ,
+        end: tQ + slide.voiceover.question.duration,
+      });
+    }
+
+    const optCount = slide?.slideType === 'trueFalse' ? 2 : 4;
+    for (let oIdx = 0; oIdx < optCount; oIdx++) {
+      const tOpt = base + sched.tOptionStarts[oIdx];
+      const sameAsPrev =
+        oIdx > 0 && Math.abs(sched.tOptionStarts[oIdx] - sched.tOptionStarts[oIdx - 1]) < 0.01;
+      const oClip = slide?.voiceover?.options?.[oIdx];
+      if (!sameAsPrev || oClip?.dataUrl) {
+        events.push({
+          time: tOpt,
+          event: { type: 'optionEnter', slideIndex: sIdx, optionIndex: oIdx },
+        });
+      }
+      if (oClip?.dataUrl && oClip.duration > 0.2) {
+        speechIntervals.push({
+          start: tOpt,
+          end: tOpt + oClip.duration,
+        });
+      }
+    }
+
+    const totalTicks = Math.floor(timing.thinkingDuration);
+    const tThink = base + sched.tThinkingStart;
+    for (let sec = 0; sec < totalTicks; sec++) {
+      const tickSecond = totalTicks - sec;
+      events.push({
+        time: tThink + sec,
+        event: {
+          type: 'countdownTick',
+          slideIndex: sIdx,
+          tickSecond,
+          urgent: tickSecond <= 3,
+        },
+      });
+    }
+
+    if ((timing.suspenseDuration ?? 0) > 0) {
+      events.push({
+        time: base + sched.tSuspenseStart,
+        event: { type: 'suspense', slideIndex: sIdx },
+      });
+    }
+
+    const tReveal = base + sched.tRevealStart;
+    events.push({
+      time: tReveal,
+      event: { type: 'correctReveal', slideIndex: sIdx },
+    });
+    if (slide?.voiceover?.answer?.dataUrl && slide.voiceover.answer.duration > 0.2) {
+      speechIntervals.push({
+        start: tReveal,
+        end: tReveal + slide.voiceover.answer.duration,
+      });
+    }
+  }
+
+  events.sort((a, b) => a.time - b.time);
+  return { events, speechIntervals };
 }
 
 export async function exportQuizVideo(
@@ -54,8 +164,7 @@ export async function exportQuizVideo(
   onProgress: (p: ExportProgress) => void,
   signal: AbortSignal
 ): Promise<ExportResult> {
-  const totalDuration = getTotalDuration(slides, timing, audio, template);
-  if (totalDuration <= 0) {
+  if (slides.length === 0) {
     throw new Error('لا توجد أسئلة صالحة للتصدير.');
   }
 
@@ -64,8 +173,8 @@ export async function exportQuizVideo(
   onProgress({
     progress: 0,
     currentTime: 0,
-    totalDuration,
-    statusText: 'جارٍ تجهيز الخطوط والقالب والأصوات...',
+    totalDuration: getTotalDuration(slides, timing, audio, template) || 1,
+    statusText: 'جارٍ تجهيز الخطوط والقالب وفحص أطوال الأصوات...',
   });
 
   try {
@@ -111,10 +220,28 @@ export async function exportQuizVideo(
     await exportAudioCtx.resume();
   }
 
-  await soundEngine.preloadAllAudio(audio, slides, exportAudioCtx);
+  const synced = await soundEngine.syncProjectAudioDurations(
+    slides,
+    audio,
+    template,
+    exportAudioCtx
+  );
+  const sSlides = synced.slides;
+  const sAudio = synced.audio;
+  const sTemplate = synced.template;
+
+  const totalDuration = getTotalDuration(sSlides, timing, sAudio, sTemplate);
+  if (totalDuration <= 0) {
+    canvas.remove();
+    if (exportAudioCtx.state !== 'closed') {
+      void exportAudioCtx.close();
+    }
+    throw new Error('لا توجد أسئلة صالحة للتصدير.');
+  }
 
   const audioDest = exportAudioCtx.createMediaStreamDestination();
 
+  // Subtle silent oscillator keeps MediaStream audio track active across silent gaps
   const keepAliveOsc = exportAudioCtx.createOscillator();
   const keepAliveGain = exportAudioCtx.createGain();
   keepAliveGain.gain.setValueAtTime(0.00001, exportAudioCtx.currentTime);
@@ -122,29 +249,48 @@ export async function exportQuizVideo(
   keepAliveGain.connect(audioDest);
   keepAliveOsc.start();
 
-  const canvasStream = canvas.captureStream(30);
-  const videoTrack = canvasStream.getVideoTracks()[0] as
+  // Prefer manual requestFrame() captureStream(0) when supported so dropped frames never desync A/V
+  let canvasStream = canvas.captureStream(0);
+  let videoTrack = canvasStream.getVideoTracks()[0] as
     | (MediaStreamTrack & { requestFrame?: () => void })
     | undefined;
+  if (!videoTrack || typeof videoTrack.requestFrame !== 'function') {
+    canvasStream.getTracks().forEach((t) => t.stop());
+    canvasStream = canvas.captureStream(30);
+    videoTrack = canvasStream.getVideoTracks()[0] as
+      | (MediaStreamTrack & { requestFrame?: () => void })
+      | undefined;
+  }
 
   const combinedStream = new MediaStream([
     ...canvasStream.getVideoTracks(),
     ...audioDest.stream.getAudioTracks(),
   ]);
 
-  const { mimeType, extension } = getPreferredMimeType();
-  const recorderOptions: MediaRecorderOptions = {
-    videoBitsPerSecond: 6_000_000,
-    audioBitsPerSecond: 192_000,
-  };
-  if (mimeType) {
-    recorderOptions.mimeType = mimeType;
+  const mimeCandidates = getPreferredMimeTypes();
+  let chosenMime = mimeCandidates[0];
+  let recorder: MediaRecorder | null = null;
+  for (const candidate of mimeCandidates) {
+    try {
+      const opts: MediaRecorderOptions = {
+        videoBitsPerSecond: 6_000_000,
+        audioBitsPerSecond: 192_000,
+      };
+      if (candidate.mimeType) opts.mimeType = candidate.mimeType;
+      recorder = new MediaRecorder(combinedStream, opts);
+      chosenMime = candidate;
+      break;
+    } catch {
+      recorder = null;
+    }
   }
-
-  const recorder = new MediaRecorder(combinedStream, recorderOptions);
+  if (!recorder) {
+    recorder = new MediaRecorder(combinedStream);
+  }
+  const activeRecorder = recorder;
   const chunks: BlobPart[] = [];
 
-  recorder.ondataavailable = (ev) => {
+  activeRecorder.ondataavailable = (ev) => {
     if (ev.data && ev.data.size > 0) {
       chunks.push(ev.data);
     }
@@ -152,7 +298,7 @@ export async function exportQuizVideo(
 
   let bgSource: AudioBufferSourceNode | null = null;
 
-  // منع انطفاء الشاشة أثناء التصدير (حتى ما ينقطع التسجيل)
+  // Keep screen awake during export on mobile/Android
   let wakeLock: { release: () => Promise<void> } | null = null;
   try {
     const wl = (navigator as unknown as {
@@ -162,6 +308,13 @@ export async function exportQuizVideo(
   } catch {
     // ignore
   }
+
+  const { events: plannedAudio, speechIntervals } = buildScheduledAudioPlan(
+    sSlides,
+    timing,
+    sAudio,
+    sTemplate
+  );
 
   return await new Promise<ExportResult>((resolve, reject) => {
     let timerId = 0;
@@ -199,8 +352,8 @@ export async function exportQuizVideo(
 
     const onAbort = () => {
       try {
-        if (recorder.state !== 'inactive') {
-          recorder.stop();
+        if (activeRecorder.state !== 'inactive') {
+          activeRecorder.stop();
         }
       } catch {
         // ignore
@@ -211,146 +364,157 @@ export async function exportQuizVideo(
 
     signal.addEventListener('abort', onAbort, { once: true });
 
-    recorder.onerror = () => {
+    activeRecorder.onerror = () => {
       cleanup();
       reject(new Error('حدث خطأ أثناء تسجيل الفيديو.'));
     };
 
-    recorder.onstop = () => {
+    activeRecorder.onstop = () => {
       signal.removeEventListener('abort', onAbort);
       cleanup();
       if (signal.aborted) return;
-      const finalType = recorder.mimeType || mimeType || 'video/webm';
+      const finalType = activeRecorder.mimeType || chosenMime.mimeType || 'video/webm';
       const blob = new Blob(chunks, { type: finalType });
       resolve({
         blob,
         mimeType: finalType,
-        extension: finalType.includes('mp4') ? 'mp4' : extension,
+        extension: finalType.includes('mp4') ? 'mp4' : chosenMime.extension,
       });
     };
 
-    renderQuizFrame(ctx, 0, slides, template, timing, audio, false);
+    // Draw frame 0 synchronously before starting recorder
+    renderQuizFrame(ctx, 0, sSlides, sTemplate, timing, sAudio, false);
     videoTrack?.requestFrame?.();
 
-    recorder.start(250);
+    activeRecorder.start(250);
 
-    // Warm up MediaRecorder + CaptureStream pipeline briefly so frame 0 & initial audio align 1:1
-    timerId = window.setTimeout(() => {
-      if (signal.aborted) return;
-      void soundEngine.startBgMusic(audio.bgMusic, audioDest, exportAudioCtx).then((src) => {
-        if (cleanedUp && src) {
-          try {
-            src.stop();
-          } catch {
-            // ignore
-          }
-          return;
+    // Small 40ms pipeline settle window so audioStartTime aligns identically with frame 0
+    const audioStartTime = exportAudioCtx.currentTime + 0.04;
+    let nextAudioIdx = 0;
+
+    void soundEngine.startBgMusic(sAudio.bgMusic, audioDest, exportAudioCtx).then((src) => {
+      if (cleanedUp && src) {
+        try {
+          src.stop();
+        } catch {
+          // ignore
         }
-        bgSource = src;
-      });
-
-      const audioStartTime = exportAudioCtx.currentTime;
-      const startPerf = performance.now();
-      const frameIntervalMs = 1000 / 30;
-      let frameIdx = 0;
-      let prevElapsed = -0.001;
-
-      const tick = () => {
-        if (signal.aborted || cleanedUp) return;
-
-        // Drive visuals directly from AudioContext sample clock so A/V never drifts
-        const audioElapsed = exportAudioCtx.currentTime - audioStartTime;
-        const elapsed = Math.min(totalDuration, Math.max(0, audioElapsed));
-
-        const events = collectSoundEventsInInterval(
-          prevElapsed,
-          elapsed,
-          slides,
-          timing,
-          audio,
-          template
+        return;
+      }
+      bgSource = src;
+      if (timing.autoDuckMusic !== false && speechIntervals.length > 0) {
+        soundEngine.scheduleBgDuckIntervals(
+          exportAudioCtx,
+          speechIntervals,
+          audioStartTime,
+          timing.bgMusicDuckRatio ?? 0.22
         );
-        const duckIfNeeded = (durSec: number) => {
-          if (timing.autoDuckMusic !== false && durSec > 0.25) {
-            soundEngine.duckBgMusic(exportAudioCtx, durSec, timing.bgMusicDuckRatio ?? 0.22);
-          }
-        };
+      }
+    });
 
-        for (const ev of events) {
-          const slide = slides[ev.slideIndex];
-          if (ev.type === 'questionEnter') {
-            if (slide?.voiceover?.question) {
-              duckIfNeeded(slide.voiceover.question.duration);
-              void soundEngine.playClip(
-                slide.voiceover.question,
-                1,
-                audioDest,
-                exportAudioCtx
-              );
-            } else {
-              void soundEngine.playSlot(audio.questionEnter, audioDest, exportAudioCtx);
-            }
-          } else if (ev.type === 'optionEnter') {
-            const optIdx = ev.optionIndex ?? 0;
-            const optClip = slide?.voiceover?.options?.[optIdx];
-            if (optClip) {
-              duckIfNeeded(optClip.duration);
-              void soundEngine.playClip(optClip, 1, audioDest, exportAudioCtx);
-            } else {
-              void soundEngine.playSlot(audio.optionEnter, audioDest, exportAudioCtx);
-            }
-          } else if (ev.type === 'countdownTick') {
-            void soundEngine.playSlot(
-              audio.countdownTick,
+    const scheduleAudioLookahead = (horizonTime: number) => {
+      while (nextAudioIdx < plannedAudio.length && plannedAudio[nextAudioIdx].time <= horizonTime) {
+        const item = plannedAudio[nextAudioIdx];
+        nextAudioIdx += 1;
+        const when = Math.max(exportAudioCtx.currentTime, audioStartTime + item.time);
+        const ev = item.event;
+        const slide = sSlides[ev.slideIndex];
+
+        if (ev.type === 'introHook') {
+          const hookSfx = sTemplate.introHookSfx ?? 'whoosh';
+          if (hookSfx && hookSfx !== 'none') {
+            soundEngine.playBuiltInSfx(hookSfx, 0.72, exportAudioCtx, audioDest, when);
+          }
+          if (sTemplate.introHookAudio?.dataUrl) {
+            void soundEngine.playClip(
+              sTemplate.introHookAudio,
+              1,
               audioDest,
               exportAudioCtx,
-              undefined,
-              !!ev.urgent
+              when
             );
-          } else if (ev.type === 'suspense') {
-            void soundEngine.playSlot(audio.suspense, audioDest, exportAudioCtx);
-          } else if (ev.type === 'correctReveal') {
-            if (slide?.voiceover?.answer) {
-              duckIfNeeded(slide.voiceover.answer.duration);
-              void soundEngine.playClip(
-                slide.voiceover.answer,
-                1,
-                audioDest,
-                exportAudioCtx
-              );
-            } else {
-              void soundEngine.playSlot(audio.correctReveal, audioDest, exportAudioCtx);
-            }
+          }
+        } else if (ev.type === 'questionEnter') {
+          if (slide?.voiceover?.question?.dataUrl) {
+            void soundEngine.playClip(
+              slide.voiceover.question,
+              1,
+              audioDest,
+              exportAudioCtx,
+              when
+            );
+          } else {
+            void soundEngine.playSlot(sAudio.questionEnter, audioDest, exportAudioCtx, when);
+          }
+        } else if (ev.type === 'optionEnter') {
+          const optIdx = ev.optionIndex ?? 0;
+          const optClip = slide?.voiceover?.options?.[optIdx];
+          if (optClip?.dataUrl) {
+            void soundEngine.playClip(optClip, 1, audioDest, exportAudioCtx, when);
+          } else {
+            void soundEngine.playSlot(sAudio.optionEnter, audioDest, exportAudioCtx, when);
+          }
+        } else if (ev.type === 'countdownTick') {
+          void soundEngine.playSlot(
+            sAudio.countdownTick,
+            audioDest,
+            exportAudioCtx,
+            when,
+            !!ev.urgent
+          );
+        } else if (ev.type === 'suspense') {
+          void soundEngine.playSlot(sAudio.suspense, audioDest, exportAudioCtx, when);
+        } else if (ev.type === 'correctReveal') {
+          if (slide?.voiceover?.answer?.dataUrl) {
+            void soundEngine.playClip(
+              slide.voiceover.answer,
+              1,
+              audioDest,
+              exportAudioCtx,
+              when
+            );
+          } else {
+            void soundEngine.playSlot(sAudio.correctReveal, audioDest, exportAudioCtx, when);
           }
         }
-        prevElapsed = elapsed;
+      }
+    };
 
-        renderQuizFrame(ctx, elapsed, slides, template, timing, audio, false);
-        videoTrack?.requestFrame?.();
+    const tick = () => {
+      if (signal.aborted || cleanedUp) return;
 
-        onProgress({
-          progress: elapsed / totalDuration,
-          currentTime: elapsed,
-          totalDuration,
-          statusText: `جارٍ تسجيل الفيديو (${Math.round((elapsed / totalDuration) * 100)}%)`,
-        });
+      const audioElapsed = exportAudioCtx.currentTime - audioStartTime;
+      const elapsed = Math.min(totalDuration, Math.max(0, audioElapsed));
 
-        if (elapsed >= totalDuration) {
-          timerId = window.setTimeout(() => {
-            if (recorder.state !== 'inactive') {
-              recorder.stop();
-            }
-          }, 250);
-          return;
-        }
+      // Schedule upcoming sounds 0.8s ahead using exact AudioContext sample clock
+      scheduleAudioLookahead(elapsed + 0.8);
 
-        frameIdx += 1;
-        const nextTargetPerf = startPerf + frameIdx * frameIntervalMs;
-        const delay = Math.max(4, nextTargetPerf - performance.now());
-        timerId = window.setTimeout(tick, delay);
-      };
+      renderQuizFrame(ctx, elapsed, sSlides, sTemplate, timing, sAudio, false);
+      videoTrack?.requestFrame?.();
 
-      tick();
-    }, 140);
+      onProgress({
+        progress: elapsed / totalDuration,
+        currentTime: elapsed,
+        totalDuration,
+        statusText: `جارٍ تسجيل الفيديو (${Math.round((elapsed / totalDuration) * 100)}%)`,
+      });
+
+      if (elapsed >= totalDuration) {
+        scheduleAudioLookahead(totalDuration + 0.1);
+        timerId = window.setTimeout(() => {
+          if (activeRecorder.state !== 'inactive') {
+            activeRecorder.stop();
+          }
+        }, 420);
+        return;
+      }
+
+      // Pace smoothly to 30fps slots without spin-looping on heavy slides
+      const nextSlotTime = (Math.floor(elapsed * 30) + 1) / 30;
+      const delay = Math.max(8, Math.min(45, (nextSlotTime - elapsed) * 1000));
+      timerId = window.setTimeout(tick, delay);
+    };
+
+    timerId = window.setTimeout(tick, 40);
   });
 }

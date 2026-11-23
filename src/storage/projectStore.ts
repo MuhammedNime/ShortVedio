@@ -275,6 +275,8 @@ export function normalizeLoadedProject(
     showIntroHook: mergedTemplate.showIntroHook ?? false,
     introHookText: mergedTemplate.introHookText ?? DEFAULT_TEMPLATE.introHookText,
     introHookDuration: sanitizeNumber(mergedTemplate.introHookDuration, 1.2),
+    introHookAudio: mergedTemplate.introHookAudio?.dataUrl ? mergedTemplate.introHookAudio : undefined,
+    introHookSfx: mergedTemplate.introHookSfx || 'whoosh',
     showEndSubscribeCta: mergedTemplate.showEndSubscribeCta ?? false,
     showPrizeLadder: mergedTemplate.showPrizeLadder ?? false,
     prizeLadderStyle: mergedTemplate.prizeLadderStyle || 'topStrip',
@@ -284,6 +286,9 @@ export function normalizeLoadedProject(
         ? mergedTemplate.prizeLadderAmounts
         : DEFAULT_TEMPLATE.prizeLadderAmounts,
     slideTransition: mergedTemplate.slideTransition || 'fade',
+    optionsAppearMode: mergedTemplate.optionsAppearMode || 'stagger',
+    optionTextAlign: mergedTemplate.optionTextAlign || 'auto',
+    optionsRtlColumns: mergedTemplate.optionsRtlColumns ?? true,
   };
 
   const sanitizedSlides = result.slides.map((s, i) => sanitizeSlide(s, i));

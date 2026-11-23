@@ -148,26 +148,30 @@ function normalizeLatexToSpokenArabic(text: string): string {
     out = out.replace(/\\(?:d|t)?frac\{([^{}]+)\}\{([^{}]+)\}/g, ' $1 على $2 ');
   }
   out = out.replace(/\\sqrt\{([^{}]+)\}/g, ' الجذر التربيعي لـ $1 ');
-  out = out.replace(/\^\{2\}|\^2/g, ' تربيع ');
-  out = out.replace(/\^\{3\}|\^3/g, ' تكعيب ');
+  out = out.replace(/\^\{2\}|\^2|²/g, ' تربيع ');
+  out = out.replace(/\^\{3\}|\^3|³/g, ' تكعيب ');
   out = out.replace(/\^\{([^{}]+)\}/g, ' أس $1 ');
   out = out.replace(/\^([0-9a-zA-Z])/g, ' أس $1 ');
   out = out.replace(/_\{([^{}]+)\}/g, ' $1 ');
   return out
-    .replace(/\\times/g, ' ضرب ')
+    .replace(/\\times|×/g, ' ضرب ')
     .replace(/\\cdot/g, ' ضرب ')
-    .replace(/\\div/g, ' تقسيم ')
-    .replace(/\\pm/g, ' زائد أو ناقص ')
-    .replace(/\\pi/g, ' باي ')
-    .replace(/\\theta/g, ' ثيتا ')
+    .replace(/\\div|÷/g, ' تقسيم ')
+    .replace(/\\pm|±/g, ' زائد أو ناقص ')
+    .replace(/\\pi|π/g, ' باي ')
+    .replace(/\\theta|θ/g, ' ثيتا ')
     .replace(/\\alpha/g, ' ألفا ')
     .replace(/\\beta/g, ' بيتا ')
-    .replace(/\\leq/g, ' أصغر من أو يساوي ')
-    .replace(/\\geq/g, ' أكبر من أو يساوي ')
-    .replace(/\\neq/g, ' لا يساوي ')
-    .replace(/\\approx/g, ' يساوي تقريباً ')
-    .replace(/\\infty/g, ' ما لا نهاية ')
-    .replace(/\\circ|\\degree/g, ' درجة ')
+    .replace(/\\leq|≤/g, ' أصغر من أو يساوي ')
+    .replace(/\\geq|≥/g, ' أكبر من أو يساوي ')
+    .replace(/\\neq|≠/g, ' لا يساوي ')
+    .replace(/\\approx|≈/g, ' يساوي تقريباً ')
+    .replace(/\\infty|∞/g, ' ما لا نهاية ')
+    .replace(/\\circ|\\degree|°/g, ' درجة ')
+    .replace(/√/g, ' الجذر التربيعي لـ ')
+    .replace(/%/g, ' بالمئة ')
+    .replace(/−/g, ' ناقص ')
+    .replace(/(\d|\s)-(\s|\d)/g, '$1 ناقص $2')
     .replace(/\\left|\\right/g, '')
     .replace(/\$/g, ' ')
     .replace(/[{}]/g, ' ')
@@ -426,7 +430,8 @@ async function generateTtsDirectlyInApk(
                 text: cleanText,
                 speechMetadata: {
                   style:
-                    style || 'Clear, energetic, articulate Modern Standard Arabic quiz show presenter',
+                    style ||
+                    'Clear, natural, articulate Modern Standard Arabic quiz presenter; read only the exact provided text cleanly without extra words',
                 },
               },
             ],
@@ -553,7 +558,7 @@ export async function generateSingleTtsClip(
   fileName: string
 ): Promise<SlideAudioClip> {
   const consistentStyle =
-    'Clear, steady, articulate Modern Standard Arabic quiz presenter speaking at a consistent natural pace';
+    'Clear, steady, articulate Modern Standard Arabic quiz presenter; read only the exact provided text cleanly at a natural pace';
   return generateTtsClip(text, voiceName, fileName, consistentStyle);
 }
 
@@ -639,24 +644,28 @@ export async function generateSlideVoiceoverSafe(
   };
 
   const consistentStyle =
-    'Clear, steady, articulate Modern Standard Arabic quiz presenter speaking at a consistent natural pace';
+    'Clear, steady, articulate Modern Standard Arabic quiz presenter; read only the exact provided text cleanly at a natural pace';
 
   try {
-    onStep?.('جارٍ توليد صوت السؤال...');
-    voiceover.question = await generateTtsClip(
-      slide.question,
-      voiceName,
-      'ai-question.wav',
-      consistentStyle
-    );
+    if (slide.question.trim()) {
+      onStep?.('جارٍ توليد صوت السؤال...');
+      voiceover.question = await generateTtsClip(
+        slide.question,
+        voiceName,
+        'ai-question.wav',
+        consistentStyle
+      );
+    }
 
     if (mode === 'full') {
       const optCount = slide.slideType === 'trueFalse' ? 2 : 4;
       for (let i = 0; i < optCount; i++) {
+        const optText = (slide.options[i] ?? '').trim();
+        if (!optText) continue;
         await pause(280);
         onStep?.(`جارٍ توليد صوت الخيار ${i + 1} من ${optCount}...`);
         voiceover.options[i] = await generateTtsClip(
-          slide.options[i],
+          optText,
           voiceName,
           `ai-option-${i + 1}.wav`,
           consistentStyle
@@ -665,16 +674,18 @@ export async function generateSlideVoiceoverSafe(
     }
 
     if (mode === 'questionAndAnswer' || mode === 'full') {
-      await pause(280);
-      onStep?.('جارٍ توليد صوت الإجابة الصحيحة...');
-      const correctOptText = slide.options[slide.correctIndex] || '';
-      const ansText = `الإجابة الصحيحة هي: ${correctOptText}`;
-      voiceover.answer = await generateTtsClip(
-        ansText,
-        voiceName,
-        'ai-answer.wav',
-        consistentStyle
-      );
+      const correctOptText = (slide.options[slide.correctIndex] ?? '').trim();
+      if (correctOptText) {
+        await pause(280);
+        onStep?.('جارٍ توليد صوت الإجابة الصحيحة...');
+        const ansText = `الإجابة الصحيحة هي: ${correctOptText}`;
+        voiceover.answer = await generateTtsClip(
+          ansText,
+          voiceName,
+          'ai-answer.wav',
+          consistentStyle
+        );
+      }
     }
 
     return {

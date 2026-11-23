@@ -148,27 +148,31 @@ function normalizeLatexToSpokenArabic(text: string): string {
     out = out.replace(/\\(?:d|t)?frac\{([^{}]+)\}\{([^{}]+)\}/g, ' $1 على $2 ');
   }
   out = out.replace(/\\sqrt\{([^{}]+)\}/g, ' الجذر التربيعي لـ $1 ');
-  out = out.replace(/\^\{2\}|\^2/g, ' تربيع ');
-  out = out.replace(/\^\{3\}|\^3/g, ' تكعيب ');
+  out = out.replace(/\^\{2\}|\^2|²/g, ' تربيع ');
+  out = out.replace(/\^\{3\}|\^3|³/g, ' تكعيب ');
   out = out.replace(/\^\{([^{}]+)\}/g, ' أس $1 ');
   out = out.replace(/\^([0-9a-zA-Z])/g, ' أس $1 ');
   out = out.replace(/_\{([^{}]+)\}/g, ' $1 ');
 
   return out
-    .replace(/\\times/g, ' ضرب ')
+    .replace(/\\times|×/g, ' ضرب ')
     .replace(/\\cdot/g, ' ضرب ')
-    .replace(/\\div/g, ' تقسيم ')
-    .replace(/\\pm/g, ' زائد أو ناقص ')
-    .replace(/\\pi/g, ' باي ')
-    .replace(/\\theta/g, ' ثيتا ')
+    .replace(/\\div|÷/g, ' تقسيم ')
+    .replace(/\\pm|±/g, ' زائد أو ناقص ')
+    .replace(/\\pi|π/g, ' باي ')
+    .replace(/\\theta|θ/g, ' ثيتا ')
     .replace(/\\alpha/g, ' ألفا ')
     .replace(/\\beta/g, ' بيتا ')
-    .replace(/\\leq/g, ' أصغر من أو يساوي ')
-    .replace(/\\geq/g, ' أكبر من أو يساوي ')
-    .replace(/\\neq/g, ' لا يساوي ')
-    .replace(/\\approx/g, ' يساوي تقريباً ')
-    .replace(/\\infty/g, ' ما لا نهاية ')
-    .replace(/\\circ|\\degree/g, ' درجة ')
+    .replace(/\\leq|≤/g, ' أصغر من أو يساوي ')
+    .replace(/\\geq|≥/g, ' أكبر من أو يساوي ')
+    .replace(/\\neq|≠/g, ' لا يساوي ')
+    .replace(/\\approx|≈/g, ' يساوي تقريباً ')
+    .replace(/\\infty|∞/g, ' ما لا نهاية ')
+    .replace(/\\circ|\\degree|°/g, ' درجة ')
+    .replace(/√/g, ' الجذر التربيعي لـ ')
+    .replace(/%/g, ' بالمئة ')
+    .replace(/−/g, ' ناقص ')
+    .replace(/(\d|\s)-(\s|\d)/g, '$1 ناقص $2')
     .replace(/\\left|\\right/g, '')
     .replace(/\$/g, ' ')
     .replace(/[{}]/g, ' ')
@@ -405,7 +409,7 @@ ${mathGuidelines}
                   speechMetadata: {
                     style:
                       style ||
-                      'Clear, energetic, articulate Modern Standard Arabic quiz show presenter',
+                      'Clear, natural, articulate Modern Standard Arabic quiz presenter; read only the exact provided text cleanly without extra words',
                   },
                 },
               ],

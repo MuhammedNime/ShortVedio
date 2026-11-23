@@ -5,6 +5,7 @@ import {
   BuiltInSfxId,
   QuestionSlide,
   SlideAudioClip,
+  TemplateSettings,
 } from '../types/quiz';
 
 export const BUILTIN_SFX_OPTIONS: { id: BuiltInSfxId; label: string }[] = [
@@ -24,6 +25,8 @@ class SoundEngine {
   private ctx: AudioContext | null = null;
   private ctxCaches = new WeakMap<AudioContext, Map<string, AudioBuffer>>();
   private bgNodes = new WeakMap<AudioContext, { gain: GainNode; baseVolume: number }>();
+  private decodedDurations = new Map<string, number>();
+  private activeSfxSources = new Set<AudioBufferSourceNode>();
   private activeBgSource: AudioBufferSourceNode | null = null;
   private activeBgGain: GainNode | null = null;
 
@@ -34,6 +37,74 @@ class SoundEngine {
       this.ctxCaches.set(ctx, map);
     }
     return map;
+  }
+
+  private trackSourceIfPreview(ctx: AudioContext, src: AudioBufferSourceNode): void {
+    if (ctx === this.ctx) {
+      this.activeSfxSources.add(src);
+      src.onended = () => {
+        this.activeSfxSources.delete(src);
+      };
+    }
+  }
+
+  public stopAllSfxAndVoice(): void {
+    this.activeSfxSources.forEach((src) => {
+      try {
+        src.stop();
+        src.disconnect();
+      } catch {
+        // already stopped
+      }
+    });
+    this.activeSfxSources.clear();
+  }
+
+  public scheduleBgDuckIntervals(
+    ctx: AudioContext,
+    intervals: Array<{ start: number; end: number }>,
+    audioStartTime: number,
+    duckRatio = 0.22
+  ): void {
+    const bgEntry = this.bgNodes.get(ctx);
+    if (!bgEntry || bgEntry.baseVolume <= 0.001 || intervals.length === 0) return;
+
+    // Sort and merge overlapping/adjacent intervals within 0.18s so ramps never collide
+    const sorted = [...intervals]
+      .filter((iv) => iv.end > iv.start + 0.05)
+      .sort((a, b) => a.start - b.start);
+    if (sorted.length === 0) return;
+
+    const merged: Array<{ start: number; end: number }> = [sorted[0]];
+    for (let i = 1; i < sorted.length; i++) {
+      const prev = merged[merged.length - 1];
+      const curr = sorted[i];
+      if (curr.start <= prev.end + 0.18) {
+        prev.end = Math.max(prev.end, curr.end);
+      } else {
+        merged.push({ ...curr });
+      }
+    }
+
+    const gainParam = bgEntry.gain.gain;
+    const base = bgEntry.baseVolume;
+    const target = Math.max(0.01, base * Math.max(0.05, Math.min(0.8, duckRatio)));
+
+    try {
+      gainParam.cancelScheduledValues(audioStartTime);
+      gainParam.setValueAtTime(base, audioStartTime);
+      for (const iv of merged) {
+        const tStart = Math.max(ctx.currentTime, audioStartTime + iv.start);
+        const tEnd = Math.max(tStart + 0.1, audioStartTime + iv.end);
+        const fadeDownStart = Math.max(audioStartTime, tStart - 0.06);
+        gainParam.setValueAtTime(base, fadeDownStart);
+        gainParam.linearRampToValueAtTime(target, tStart + 0.04);
+        gainParam.setValueAtTime(target, Math.max(tStart + 0.05, tEnd - 0.04));
+        gainParam.linearRampToValueAtTime(base, tEnd + 0.22);
+      }
+    } catch {
+      // ignore scheduling errors
+    }
   }
 
   public duckBgMusic(
@@ -132,16 +203,26 @@ class SoundEngine {
       const arrayBuffer = await response.arrayBuffer();
       const decoded = await ctx.decodeAudioData(arrayBuffer);
       cache.set(cacheKey, decoded);
+      if (Number.isFinite(decoded.duration) && decoded.duration > 0) {
+        this.decodedDurations.set(cacheKey, decoded.duration);
+      }
       return decoded;
     } catch {
       return null;
     }
   }
 
+  public getExactDuration(dataUrl: string | undefined, fallback: number): number {
+    if (!dataUrl) return fallback;
+    const d = this.decodedDurations.get(this.getDataUrlKey(dataUrl));
+    return d && Number.isFinite(d) && d > 0 ? d : fallback;
+  }
+
   public async preloadAllAudio(
     audio: AudioSettings,
     slides: QuestionSlide[] = [],
-    targetCtx?: AudioContext
+    targetCtx?: AudioContext,
+    template?: TemplateSettings
   ): Promise<void> {
     const slots: AudioSlotId[] = [
       'questionEnter',
@@ -158,6 +239,10 @@ class SoundEngine {
       }
     });
 
+    if (template?.introHookAudio?.dataUrl) {
+      tasks.push(this.decodeDataUrl(template.introHookAudio.dataUrl, targetCtx));
+    }
+
     for (const slide of slides) {
       if (slide.voiceover?.question?.dataUrl) {
         tasks.push(this.decodeDataUrl(slide.voiceover.question.dataUrl, targetCtx));
@@ -173,6 +258,77 @@ class SoundEngine {
     }
 
     await Promise.all(tasks);
+  }
+
+  public async syncProjectAudioDurations(
+    slides: QuestionSlide[],
+    audio: AudioSettings,
+    template: TemplateSettings,
+    targetCtx?: AudioContext
+  ): Promise<{ slides: QuestionSlide[]; audio: AudioSettings; template: TemplateSettings }> {
+    await this.preloadAllAudio(audio, slides, targetCtx, template);
+
+    const syncClip = (clip?: SlideAudioClip): SlideAudioClip | undefined => {
+      if (!clip?.dataUrl) return clip;
+      const exact = this.getExactDuration(clip.dataUrl, clip.duration);
+      return Math.abs(exact - clip.duration) > 0.01 ? { ...clip, duration: exact } : clip;
+    };
+
+    const syncedSlides: QuestionSlide[] = slides.map((s) => {
+      if (!s.voiceover) return s;
+      const q = syncClip(s.voiceover.question);
+      const ans = syncClip(s.voiceover.answer);
+      const opts = s.voiceover.options
+        ? ([
+            syncClip(s.voiceover.options[0]),
+            syncClip(s.voiceover.options[1]),
+            syncClip(s.voiceover.options[2]),
+            syncClip(s.voiceover.options[3]),
+          ] as [
+            SlideAudioClip | undefined,
+            SlideAudioClip | undefined,
+            SlideAudioClip | undefined,
+            SlideAudioClip | undefined
+          ])
+        : undefined;
+      return {
+        ...s,
+        voiceover: {
+          ...s.voiceover,
+          question: q,
+          answer: ans,
+          options: opts,
+        },
+      };
+    });
+
+    const syncSlot = (cfg: AudioSlotConfig): AudioSlotConfig => {
+      if (cfg.sourceType !== 'custom' || !cfg.customDataUrl) return cfg;
+      const exact = this.getExactDuration(cfg.customDataUrl, cfg.duration ?? 0);
+      return exact > 0 ? { ...cfg, duration: exact } : cfg;
+    };
+
+    const syncedAudio: AudioSettings = {
+      questionEnter: syncSlot(audio.questionEnter),
+      optionEnter: syncSlot(audio.optionEnter),
+      countdownTick: syncSlot(audio.countdownTick),
+      suspense: syncSlot(audio.suspense),
+      correctReveal: syncSlot(audio.correctReveal),
+      bgMusic: syncSlot(audio.bgMusic),
+    };
+
+    const syncedTemplate: TemplateSettings = template.introHookAudio?.dataUrl
+      ? {
+          ...template,
+          introHookAudio: syncClip(template.introHookAudio),
+        }
+      : template;
+
+    return {
+      slides: syncedSlides,
+      audio: syncedAudio,
+      template: syncedTemplate,
+    };
   }
 
   public async playClip(
@@ -196,6 +352,7 @@ class SoundEngine {
       gain.gain.setValueAtTime(volume, startTime);
       src.connect(gain);
       gain.connect(dest);
+      this.trackSourceIfPreview(ctx, src);
       src.start(startTime);
       return;
     }
@@ -209,6 +366,7 @@ class SoundEngine {
     gain.gain.setValueAtTime(volume, startTime);
     src.connect(gain);
     gain.connect(dest);
+    this.trackSourceIfPreview(ctx, src);
     src.start(startTime);
   }
 
@@ -235,6 +393,7 @@ class SoundEngine {
         gain.gain.setValueAtTime(config.volume, startTime);
         src.connect(gain);
         gain.connect(dest);
+        this.trackSourceIfPreview(ctx, src);
         src.start(startTime);
         return;
       }

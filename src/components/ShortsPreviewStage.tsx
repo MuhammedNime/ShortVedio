@@ -86,6 +86,9 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
   const timeRef = useRef(0);
   const totalDurationRef = useRef(totalDuration);
   const hasUserScrubbedRef = useRef(false);
+  const isExternallySelectedSlideRef = useRef(false);
+  const isScrubSlideSyncRef = useRef(false);
+  const forceFirstTickRef = useRef(false);
   const isPlayingRef = useRef(false);
   const isMutedRef = useRef(false);
   const slidesRef = useRef(slides);
@@ -117,6 +120,7 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
     if (isExporting) {
       setIsPlaying(false);
       soundEngine.stopBgMusic();
+      soundEngine.stopAllSfxAndVoice();
     }
   }, [isExporting]);
 
@@ -158,17 +162,23 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
   const prevSlideIdxRef = useRef(activeSlideIndex);
   useEffect(() => {
     if (prevSlideIdxRef.current !== activeSlideIndex && !isPlayingRef.current) {
-      const schedules = computeProjectTimeline(slides, timing, audio, template);
-      const sched = schedules[activeSlideIndex];
-      const target = sched
-        ? sched.startTime + sched.tThinkingStart + Math.min(1.1, timing.thinkingDuration * 0.25)
-        : 0;
-      const clamped = Math.min(totalDuration, target);
-      syncTimeUi(clamped, totalDuration, true);
-      const canvas = canvasRef.current;
-      const ctx = canvas?.getContext('2d', { alpha: false });
-      if (ctx) {
-        renderQuizFrame(ctx, clamped, slides, template, timing, audio, true);
+      if (isScrubSlideSyncRef.current) {
+        isScrubSlideSyncRef.current = false;
+      } else {
+        isExternallySelectedSlideRef.current = true;
+        hasUserScrubbedRef.current = false;
+        const schedules = computeProjectTimeline(slides, timing, audio, template);
+        const sched = schedules[activeSlideIndex];
+        const target = sched
+          ? sched.startTime + sched.tThinkingStart + Math.min(1.1, timing.thinkingDuration * 0.25)
+          : 0;
+        const clamped = Math.min(totalDuration, target);
+        syncTimeUi(clamped, totalDuration, true);
+        const canvas = canvasRef.current;
+        const ctx = canvas?.getContext('2d', { alpha: false });
+        if (ctx) {
+          renderQuizFrame(ctx, clamped, slides, template, timing, audio, true);
+        }
       }
     }
     prevSlideIdxRef.current = activeSlideIndex;
@@ -178,16 +188,28 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
     isPlayingRef.current = isPlaying;
     if (!isPlaying) {
       soundEngine.stopBgMusic();
+      soundEngine.stopAllSfxAndVoice();
       return;
     }
 
     let canceled = false;
 
     const startPlayback = async () => {
+      let activeSlides = slidesRef.current;
+      let activeAudio = audioRef.current;
+      let activeTemplate = templateRef.current;
+
       if (!isMutedRef.current) {
-        await soundEngine.preloadAllAudio(audioRef.current, slidesRef.current);
+        const synced = await soundEngine.syncProjectAudioDurations(
+          slidesRef.current,
+          audioRef.current,
+          templateRef.current
+        );
         if (canceled || !isPlayingRef.current) return;
-        void soundEngine.startBgMusic(audioRef.current.bgMusic);
+        activeSlides = synced.slides;
+        activeAudio = synced.audio;
+        activeTemplate = synced.template;
+        void soundEngine.startBgMusic(activeAudio.bgMusic);
       }
 
       let rafId = 0;
@@ -200,17 +222,20 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
         const dt = Math.min(0.1, (now - lastPerf) / 1000);
         lastPerf = now;
 
+        const useSynced = activeSlides.length === slidesRef.current.length;
+        const curSlides = useSynced ? activeSlides : slidesRef.current;
+        const curAudio = useSynced ? activeAudio : audioRef.current;
+        const curTemplate = useSynced ? activeTemplate : templateRef.current;
+
         const rawPrevT = timeRef.current;
-        // Ensure events sitting right at play start time (including questionEnter at 0ms) fire synchronously with first visible frame
-        const prevT = isFirstTick ? rawPrevT - 0.001 : rawPrevT;
+        const useFirstMargin = isFirstTick || forceFirstTickRef.current;
+        // Ensure events sitting right at play/step start time fire synchronously with first frame
+        const prevT = useFirstMargin ? rawPrevT - 0.001 : rawPrevT;
         isFirstTick = false;
+        forceFirstTickRef.current = false;
+
         let nextT = rawPrevT + dt;
-        const maxDur = getTotalDuration(
-          slidesRef.current,
-          timingRef.current,
-          audioRef.current,
-          templateRef.current
-        );
+        const maxDur = getTotalDuration(curSlides, timingRef.current, curAudio, curTemplate);
 
         if (nextT >= maxDur) {
           nextT = maxDur;
@@ -221,15 +246,16 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
             renderQuizFrame(
               ctx,
               nextT,
-              slidesRef.current,
-              templateRef.current,
+              curSlides,
+              curTemplate,
               timingRef.current,
-              audioRef.current,
+              curAudio,
               true
             );
           }
           setIsPlaying(false);
           soundEngine.stopBgMusic();
+          soundEngine.stopAllSfxAndVoice();
           return;
         }
 
@@ -237,10 +263,10 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
           const events = collectSoundEventsInInterval(
             prevT,
             nextT,
-            slidesRef.current,
+            curSlides,
             timingRef.current,
-            audioRef.current,
-            templateRef.current
+            curAudio,
+            curTemplate
           );
           const duckIfNeeded = (durSec: number) => {
             if (timingRef.current.autoDuckMusic !== false && durSec > 0.25) {
@@ -249,13 +275,23 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
           };
 
           for (const ev of events) {
-            const s = slidesRef.current[ev.slideIndex];
-            if (ev.type === 'questionEnter') {
+            const s = curSlides[ev.slideIndex];
+            if (ev.type === 'introHook') {
+              const hookSfx = curTemplate.introHookSfx ?? 'whoosh';
+              if (hookSfx && hookSfx !== 'none') {
+                const ctx = soundEngine.getContext();
+                soundEngine.playBuiltInSfx(hookSfx, 0.72, ctx, ctx.destination, ctx.currentTime);
+              }
+              if (curTemplate.introHookAudio?.dataUrl) {
+                duckIfNeeded(curTemplate.introHookAudio.duration || 1.2);
+                void soundEngine.playClip(curTemplate.introHookAudio, 1);
+              }
+            } else if (ev.type === 'questionEnter') {
               if (s?.voiceover?.question) {
                 duckIfNeeded(s.voiceover.question.duration);
                 void soundEngine.playClip(s.voiceover.question, 1);
               } else {
-                void soundEngine.playSlot(audioRef.current.questionEnter);
+                void soundEngine.playSlot(curAudio.questionEnter);
               }
             } else if (ev.type === 'optionEnter') {
               const oIdx = ev.optionIndex ?? 0;
@@ -264,24 +300,24 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
                 duckIfNeeded(oClip.duration);
                 void soundEngine.playClip(oClip, 1);
               } else {
-                void soundEngine.playSlot(audioRef.current.optionEnter);
+                void soundEngine.playSlot(curAudio.optionEnter);
               }
             } else if (ev.type === 'countdownTick') {
               void soundEngine.playSlot(
-                audioRef.current.countdownTick,
+                curAudio.countdownTick,
                 undefined,
                 undefined,
                 undefined,
                 !!ev.urgent
               );
             } else if (ev.type === 'suspense') {
-              void soundEngine.playSlot(audioRef.current.suspense);
+              void soundEngine.playSlot(curAudio.suspense);
             } else if (ev.type === 'correctReveal') {
               if (s?.voiceover?.answer) {
                 duckIfNeeded(s.voiceover.answer.duration);
                 void soundEngine.playClip(s.voiceover.answer, 1);
               } else {
-                void soundEngine.playSlot(audioRef.current.correctReveal);
+                void soundEngine.playSlot(curAudio.correctReveal);
               }
             }
           }
@@ -295,10 +331,10 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
 
         const info = getSlideTimeInfo(
           nextT,
-          slidesRef.current,
+          curSlides,
           timingRef.current,
-          audioRef.current,
-          templateRef.current
+          curAudio,
+          curTemplate
         );
         if (info && onActiveSlideChange && info.slideIndex !== prevSlideIdxRef.current) {
           prevSlideIdxRef.current = info.slideIndex;
@@ -311,10 +347,10 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
           renderQuizFrame(
             ctx,
             nextT,
-            slidesRef.current,
-            templateRef.current,
+            curSlides,
+            curTemplate,
             timingRef.current,
-            audioRef.current,
+            curAudio,
             true
           );
         }
@@ -339,27 +375,49 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
       stopRaf?.();
       setCurrentTime(timeRef.current);
       soundEngine.stopBgMusic();
+      soundEngine.stopAllSfxAndVoice();
     };
   }, [isPlaying, onActiveSlideChange]);
 
   const handleTogglePlay = () => {
     soundEngine.getContext();
-    if (!isPlaying && (!hasUserScrubbedRef.current || timeRef.current >= totalDuration - 0.05)) {
+    if (
+      !isPlaying &&
+      (!hasUserScrubbedRef.current ||
+        isExternallySelectedSlideRef.current ||
+        timeRef.current >= totalDuration - 0.05)
+    ) {
       hasUserScrubbedRef.current = true;
+      isExternallySelectedSlideRef.current = false;
       const schedules = computeProjectTimeline(slides, timing, audio, template);
       const sched = schedules[activeSlideIndex];
-      const startAt = timeRef.current >= totalDuration - 0.05 ? 0 : sched ? sched.startTime : 0;
+      const startAt =
+        timeRef.current >= totalDuration - 0.05
+          ? 0
+          : activeSlideIndex === 0 && template.showIntroHook
+            ? 0
+            : sched
+              ? sched.startTime
+              : 0;
       timeRef.current = startAt;
       setCurrentTime(startAt);
+      forceFirstTickRef.current = true;
     }
     setIsPlaying((p) => !p);
   };
 
   const handleRestart = () => {
     soundEngine.getContext();
+    soundEngine.stopAllSfxAndVoice();
     hasUserScrubbedRef.current = true;
+    isExternallySelectedSlideRef.current = false;
+    forceFirstTickRef.current = true;
     timeRef.current = 0;
     setCurrentTime(0);
+    if (onActiveSlideChange && activeSlideIndex !== 0) {
+      isScrubSlideSyncRef.current = true;
+      onActiveSlideChange(0);
+    }
     setIsPlaying(true);
   };
 
@@ -368,19 +426,30 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
     const schedules = computeProjectTimeline(slides, timing, audio, template);
     const sched = schedules[nextIdx];
     if (sched && onActiveSlideChange) {
+      soundEngine.getContext();
+      soundEngine.stopAllSfxAndVoice();
       hasUserScrubbedRef.current = true;
+      isExternallySelectedSlideRef.current = false;
+      isScrubSlideSyncRef.current = true;
+      forceFirstTickRef.current = true;
       onActiveSlideChange(nextIdx);
       timeRef.current = sched.startTime;
       setCurrentTime(sched.startTime);
       setIsPlaying(true);
-      soundEngine.getContext();
     }
   };
 
   const handleScrub = (val: number) => {
     hasUserScrubbedRef.current = true;
+    isExternallySelectedSlideRef.current = false;
+    soundEngine.stopAllSfxAndVoice();
     setIsPlaying(false);
     syncTimeUi(val, totalDuration, true);
+    const info = getSlideTimeInfo(val, slides, timing, audio, template);
+    if (info && onActiveSlideChange && info.slideIndex !== activeSlideIndex) {
+      isScrubSlideSyncRef.current = true;
+      onActiveSlideChange(info.slideIndex);
+    }
     const canvas = canvasRef.current;
     const ctx = canvas?.getContext('2d', { alpha: false });
     if (ctx) {
@@ -393,6 +462,7 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
       const next = !prev;
       if (next) {
         soundEngine.stopBgMusic();
+        soundEngine.stopAllSfxAndVoice();
       } else if (isPlayingRef.current) {
         void soundEngine.startBgMusic(audioRef.current.bgMusic);
       }
@@ -404,10 +474,13 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
     phase: 'intro' | 'question' | 'opt1' | 'opt4' | 'timer' | 'suspense' | 'reveal' | 'end'
   ) => {
     hasUserScrubbedRef.current = true;
+    isExternallySelectedSlideRef.current = false;
+    soundEngine.stopAllSfxAndVoice();
     setIsPlaying(false);
     const schedules = computeProjectTimeline(slides, timing, audio, template);
     const sched = schedules[activeSlideIndex] ?? schedules[0];
     if (!sched) return;
+    const isTF = slides[activeSlideIndex]?.slideType === 'trueFalse';
 
     let target = sched.startTime + sched.tQuestionStart + 0.36;
     if (phase === 'intro') {
@@ -415,7 +488,7 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
     } else if (phase === 'opt1') {
       target = sched.startTime + sched.tOptionStarts[0] + 0.36;
     } else if (phase === 'opt4') {
-      target = sched.startTime + sched.tOptionStarts[3] + 0.36;
+      target = sched.startTime + sched.tOptionStarts[isTF ? 1 : 3] + 0.36;
     } else if (phase === 'timer') {
       target = sched.startTime + sched.tThinkingStart + Math.min(1.1, timing.thinkingDuration * 0.25);
     } else if (phase === 'suspense') {
@@ -455,6 +528,7 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
     }
   };
 
+  const isActiveTF = slides[activeSlideIndex]?.slideType === 'trueFalse';
   const phases: {
     id: 'intro' | 'question' | 'opt1' | 'opt4' | 'timer' | 'suspense' | 'reveal' | 'end';
     label: string;
@@ -462,7 +536,7 @@ export const ShortsPreviewStage: React.FC<ShortsPreviewStageProps> = ({
     ...(template.showIntroHook ? [{ id: 'intro' as const, label: 'المقدمة' }] : []),
     { id: 'question', label: 'السؤال' },
     { id: 'opt1', label: 'خيار 1' },
-    { id: 'opt4', label: 'كل الخيارات' },
+    { id: 'opt4', label: isActiveTF ? 'الخياران' : 'كل الخيارات' },
     { id: 'timer', label: 'المؤقت' },
     ...(timing.suspenseDuration > 0 ? [{ id: 'suspense' as const, label: 'التشويق' }] : []),
     { id: 'reveal', label: 'الناتج' },
